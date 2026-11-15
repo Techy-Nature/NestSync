@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A small nest (bowl) with two sync arrows above it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF9D7CFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M34,58 A20,20 0 0,1 66,42" />
+    <path
+        android:fillColor="#FF9D7CFF"
+        android:pathData="M60,34 L72,42 L60,50 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFE6DEFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M74,50 A20,20 0 0,1 42,66" />
+    <path
+        android:fillColor="#FFE6DEFF"
+        android:pathData="M48,74 L36,66 L48,58 Z" />
+    <path
+        android:fillColor="#FFB08A5A"
+        android:pathData="M28,70 Q54,92 80,70 L76,78 Q54,96 32,78 Z" />
+</vector>
