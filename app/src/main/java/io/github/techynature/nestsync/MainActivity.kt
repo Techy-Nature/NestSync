@@ -150,11 +150,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        storageOk.value = hasStorageAccess(this)
-    }
+    // No permission-result callback needed: the permission prompt pauses the
+    // activity, and onResume() re-checks access when it closes.
 }
 
 fun hasStorageAccess(context: Context): Boolean =
