@@ -100,6 +100,32 @@ class GitEngineTest {
     }
 
     @Test
+    fun unpushedCommitsAreCounted() {
+        val (_, a, _) = setup()
+        File(a, "new.tw").writeText("x\n")
+        Git.open(a).use { g ->
+            g.add().addFilepattern(".").call()
+            g.commit().setMessage("local").setAuthor("t", "t@x").setCommitter("t", "t@x").call()
+        }
+        assertEquals(1, GitEngine.inspect(a).unpushed)
+        assertEquals(0, GitEngine.inspect(a).changedFiles)
+        val r = sync(a)
+        assertTrue(r.details.toString(), r.ok)
+        assertTrue(r.details.toString(), r.details.any { "waiting to upload" in it })
+        assertEquals(0, GitEngine.inspect(a).unpushed)
+    }
+
+    @Test
+    fun pushPermissionErrorIsExplained() {
+        val msg = GitEngine.friendly(
+            org.eclipse.jgit.api.errors.TransportException(
+                "https://github.com/x/y.git: git-receive-pack not permitted on 'https://github.com/x/y.git/'",
+            ),
+        )
+        assertTrue(msg, msg.contains("WRITE access"))
+    }
+
+    @Test
     fun sshUrlsAreConverted() {
         assertTrue(GitEngine.isSsh("git@github.com:Techy-Nature/NestSync.git"))
         assertEquals(
