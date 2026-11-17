@@ -76,6 +76,8 @@ object GitEngine {
         val remoteUrl: String?,
         val changedFiles: Int,
         val error: String? = null,
+        /** Commits made on this phone that the server doesn't have yet (as of the last fetch). */
+        val unpushed: Int = 0,
     )
 
     fun inspect(folder: File): RepoInfo {
@@ -86,7 +88,7 @@ object GitEngine {
                 val repo = git.repository
                 val status = git.status().call()
                 val changed = status.uncommittedChanges.size + status.untracked.size
-                RepoInfo(true, repo.branch, remoteUrl(repo), changed)
+                RepoInfo(true, repo.branch, remoteUrl(repo), changed, unpushed = unpushedCount(git))
             }
         } catch (e: Exception) {
             RepoInfo(false, null, null, 0, friendly(e))
@@ -187,7 +189,12 @@ object GitEngine {
                     git.commit().setMessage(commitMessage).setAuthor(ident).setCommitter(ident).call()
                     notes += "Committed $changed changed file(s)"
                 } else {
-                    notes += "No local changes to commit"
+                    val waiting = unpushedCount(git)
+                    notes += if (waiting > 0) {
+                        "No new edits, but $waiting earlier commit(s) are still waiting to upload"
+                    } else {
+                        "No local changes to commit"
+                    }
                 }
 
                 // 2. Fetch
@@ -339,6 +346,22 @@ object GitEngine {
         )
     }
 
+    /**
+     * Commits on the current branch that the server's copy (as of the last fetch) doesn't
+     * have. Returns 0 when that can't be worked out, for example before the first push.
+     */
+    fun unpushedCount(git: Git): Int = try {
+        val repo = git.repository
+        val branch = repo.branch
+        val remoteBranch = repo.config.getString("branch", branch, "merge")
+            ?.let { Repository.shortenRefName(it) } ?: branch
+        val head = repo.resolve(Constants.HEAD)
+        val tracking = repo.resolve("refs/remotes/origin/$remoteBranch")
+        if (head == null || tracking == null) 0 else countCommits(git, tracking, head)
+    } catch (e: Exception) {
+        0
+    }
+
     /** Commits reachable from [to] but not from [from]. */
     private fun countCommits(git: Git, from: org.eclipse.jgit.lib.ObjectId, to: org.eclipse.jgit.lib.ObjectId): Int =
         if (from == to) 0 else git.log().addRange(from, to).call().count()
@@ -357,6 +380,11 @@ object GitEngine {
         return when {
             "not authorized" in lower || "authentication is required" in lower || "401" in lower ->
                 "The server refused the login. Check the username and token for this host in Settings → Hosts."
+            "receive-pack not permitted" in lower || "not permitted" in lower ->
+                "The server let NestSync download but not upload. The token for this host needs WRITE access " +
+                    "to this repo. On GitHub: fine-grained token → Repository access must include this repo, " +
+                    "and Repository permissions → Contents must be \"Read and write\". " +
+                    "Also check a token is saved for this host in Settings."
             "403" in lower || "forbidden" in lower ->
                 "The token works but isn't allowed to do this. Make sure it has read AND write access to repositories."
             "unknownhost" in lower || "unable to resolve host" in lower || "no address associated" in lower ->

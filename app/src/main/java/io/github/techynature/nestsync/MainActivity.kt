@@ -373,6 +373,12 @@ private fun RepoCard(
                 }
             }
             Text(summary, color = if (info?.isRepo == false) Bad else TextDim, fontSize = 14.sp)
+            if (info != null && info.unpushed > 0) {
+                Text(
+                    "${info.unpushed} commit(s) waiting to upload",
+                    color = Warn, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                )
+            }
 
             if (repo.lastTitle != null && busyText == null) {
                 Spacer(Modifier.height(6.dp))
