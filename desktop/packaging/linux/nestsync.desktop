@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NestSync
+Comment=Sync your git repos with one click
+Exec=NestSync
+Icon=nestsync
+Categories=Development;RevisionControl;
+Terminal=false
+StartupWMClass=io-github-techynature-nestsync-MainKt

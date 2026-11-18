@@ -1,6 +1,6 @@
 # NestSync
 
-A small Android app that syncs your git repos with one tap. It does the same thing as the old Termux shortcut:
+A small app that syncs your git repos with one tap (or click). It runs on **Android**, **Linux** (AppImage) and **Mac**. It does the same thing as the old Termux shortcut:
 
 ```
 git add -A
@@ -17,9 +17,11 @@ It works with any git server that speaks HTTPS: Git.gay, GitHub, Codeberg, any F
 - Clear messages: what was committed, pulled and pushed, or exactly what went wrong
 - Dark theme, always
 
+On a computer? Jump to **[NestSync on Linux and Mac](#nestsync-on-linux-and-mac)**.
+
 ---
 
-## 1. Install the app
+## 1. Install the app (Android)
 
 1. On your phone, open the **[latest release](https://github.com/Techy-Nature/NestSync/releases/latest)**.
 2. Under **Assets**, tap **NestSync.apk** to download it.
@@ -102,6 +104,67 @@ Tap any repo card to see the full result of the last sync, test the login, chang
 
 ---
 
+## NestSync on Linux and Mac
+
+The computer version looks and works like the phone app: the same repo cards, the same **Sync** button, the same Settings. It does the same `git add` / `commit` / `pull --rebase` / `push`, with the same code.
+
+### Install on Linux (AppImage)
+
+An AppImage is one file that runs on most Linux systems (Fedora, Nobara, Ubuntu, Arch, Mint…) without installing anything.
+
+1. Open the **[latest release](https://github.com/Techy-Nature/NestSync/releases/latest)**.
+2. Under **Assets**, download **NestSync-x86_64.AppImage**.
+3. Make it executable. Either right-click it → **Properties** → **Permissions** → tick **Allow executing file as program**, or in a terminal:
+   ```
+   chmod +x ~/Downloads/NestSync-x86_64.AppImage
+   ```
+4. Double-click it (or run `~/Downloads/NestSync-x86_64.AppImage`).
+5. Optional: move it somewhere permanent, like `~/Applications/`. Tools such as **Gear Lever** or **AppImageLauncher** can add it to your app menu.
+
+To update, download the newest AppImage and replace the old file. Your repos and logins are kept.
+
+> If it won't start and mentions **FUSE**, run it once with `--appimage-extract-and-run` after the file name, or install your system's `fuse` package.
+
+### Install on a Mac
+
+1. Open the **[latest release](https://github.com/Techy-Nature/NestSync/releases/latest)**.
+2. Under **Assets**, download the right file:
+   - **NestSync-mac-AppleSilicon.dmg** for Macs with an M1, M2, M3 or newer chip.
+   - **NestSync-mac-Intel.dmg** for older Intel Macs.
+   - Not sure? Open the Apple menu → **About This Mac**. "Chip: Apple M…" means Apple Silicon; "Processor: Intel" means Intel.
+3. Open the DMG and drag **NestSync** into **Applications**.
+4. Open **NestSync** from Applications. The first time, macOS says it can't check the app for malware, because the app isn't signed with an Apple Developer account yet. That's expected:
+   1. Click **Done** (or **OK**) on that message.
+   2. Open **System Settings** → **Privacy & Security**.
+   3. Scroll down to the message about **NestSync** and click **Open Anyway**.
+   4. Enter your Mac password, then click **Open Anyway** once more.
+
+   You only do this once. After that it opens normally.
+
+> If macOS instead says the app **"is damaged and can't be opened"**, open **Terminal** and run this, then open NestSync again:
+> ```
+> xattr -dr com.apple.quarantine /Applications/NestSync.app
+> ```
+
+To update, download the newest DMG and drag NestSync into Applications again, choosing **Replace**.
+
+### Set it up on a computer
+
+The steps are the same as on the phone, with a couple of differences:
+
+1. **Tokens:** make one as in [step 4](#4-make-an-access-token), then click ⚙ **Settings** → **Add a host**. The same token can be used on your phone and your computer.
+2. **Repos:** click **Add repo**, then **Browse for folder…** and pick the folder that has `.git` inside. You can also type a path such as `~/Stories/my-story`. No storage permission or Termux steps are needed.
+3. **Clone:** **Add repo → Clone it instead** saves new clones in `~/Stories` unless you pick another folder.
+
+**Good to know on a computer**
+
+- Logins are saved in `~/.config/NestSync/hosts.json` on Linux and `~/Library/Application Support/NestSync/hosts.json` on a Mac. The file can only be read by your own account (the same way git's own credential store and the GitHub CLI keep tokens). The phone app encrypts them with the Android Keystore instead; computers don't have that.
+- NestSync reads your normal git settings (`~/.gitconfig`), so commits use your usual name and email. It never signs commits, so if you sign commits on the command line, NestSync's commits will be unsigned. Your `~/.gitconfig` is never changed.
+- Commit messages say "Sync from computer …" instead of "Sync from phone …".
+- If a conflict happens, fix it in a terminal the same way as in the table below, then click **Sync** again.
+
+---
+
 ## When something goes wrong
 
 | Message | What to do |
@@ -111,20 +174,66 @@ Tap any repo card to see the full result of the last sync, test the login, chang
 | **SSH remote not supported** | Tap the repo, then **Switch remote to HTTPS**. |
 | **Conflict, nothing was pushed** | The same lines changed on the server and on your phone. Nothing is lost: your commit stays on the phone. Fix it in Termux: `git pull --rebase`, edit the listed files, `git add .`, `git rebase --continue`, then Sync again. |
 | **Android blocked access to the folder** | Redo step 2 (All files access). |
+| **Your computer blocked access to the folder** | Make sure your account can read and write that folder. On a Mac, check **System Settings → Privacy & Security → Files and Folders** for NestSync. |
+| **This repo's own git settings ask for signed commits** | In a terminal, inside the repo, run `git config commit.gpgsign false` and `git config --unset gpg.format`. |
 | **Can't reach the server** | Check your internet connection. |
 
-## How the APK is built
+## How the apps are built
 
-Every push runs [`.github/workflows/build.yml`](.github/workflows/build.yml) on GitHub Actions. It runs the sync tests (real pushes, pulls, deletions and conflicts between two clones), builds the APK, and on `main` publishes it as a new release.
+The code is in three parts:
+
+| Folder | What it is |
+| --- | --- |
+| `core/` | The git engine (all the sync work), in plain Kotlin with JGit. Both apps use it. |
+| `app/` | The Android app. |
+| `desktop/` | The Linux and Mac app, made with Compose for Desktop (the computer version of the UI kit the Android app uses). |
+
+Every push runs [`.github/workflows/build.yml`](.github/workflows/build.yml) on GitHub Actions:
+
+1. **Android:** runs the sync tests (real pushes, pulls, deletions and conflicts between two clones), then builds `NestSync.apk`.
+2. **Linux:** builds the app on Ubuntu, packs it into `NestSync-x86_64.AppImage`, then runs it: a quick self-test (a real sync and an HTTPS check) and a 15-second launch on a virtual screen.
+3. **Mac:** builds `NestSync-mac-AppleSilicon.dmg` and `NestSync-mac-Intel.dmg` on GitHub's Mac machines, with the same self-test and launch check.
+4. **Release:** on `main`, once all of them pass, publishes all four files together as one new release.
+
+Each desktop build includes its own trimmed-down Java, so nobody needs Java installed. Mac signing and notarization are explained in [docs/DESKTOP.md](docs/DESKTOP.md).
 
 **Signing key:** to install updates over each other, every APK must be signed with the same key. The repo includes a public key (`app/nestsync-public.keystore`) so builds just work. Because it's public, anyone could sign an app with it. To use your own private key instead, add these repository secrets (Settings → Secrets and variables → Actions): `NESTSYNC_KEYSTORE_BASE64`, `NESTSYNC_KEYSTORE_PASSWORD`, `NESTSYNC_KEY_ALIAS`, `NESTSYNC_KEY_PASSWORD`. Switching keys means uninstalling the old app once (you'd re-enter your tokens).
 
 ## Building on a computer
 
-Needs JDK 17 and the Android SDK:
+Everything needs JDK 17 or newer.
+
+**Sync tests:**
 
 ```
-./gradlew testReleaseUnitTest assembleRelease
+./gradlew :core:test
+```
+
+**Android APK** (also needs the Android SDK):
+
+```
+./gradlew :app:assembleRelease
 ```
 
 The APK lands in `app/build/outputs/apk/release/`.
+
+**Desktop app**, to try it straight away:
+
+```
+./gradlew :desktop:run
+```
+
+**Linux AppImage** (on x86_64 Linux):
+
+```
+./gradlew :desktop:createDistributable
+desktop/packaging/linux/build-appimage.sh
+```
+
+**Mac DMG** (on a Mac):
+
+```
+./gradlew :desktop:packageDmg
+```
+
+The DMG lands in `desktop/build/compose/binaries/main/dmg/`. See [docs/DESKTOP.md](docs/DESKTOP.md) for more.

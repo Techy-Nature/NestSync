@@ -27,8 +27,23 @@ data class SyncOutcome(val ok: Boolean, val title: String, val details: List<Str
 data class Identity(val name: String, val email: String)
 
 /**
- * All the git work lives here. It only uses JGit and java.io, so it has no Android
- * dependencies and can be tested on a normal computer.
+ * Words that differ between the Android app and the desktop app. Android keeps these
+ * defaults; the desktop app swaps them in once at startup.
+ */
+object Wording {
+    /** "phone" or "computer", used in commit messages and explanations. */
+    var device = "phone"
+    /** Where the person runs git by hand to fix a conflict. */
+    var terminal = "Termux"
+    /** "Tap" on a phone, "Click" on a computer. */
+    var tap = "Tap"
+    /** Shown when the system won't let NestSync read or write a folder. */
+    var folderBlocked = "Android blocked access to the folder. Give the app 'All files access' (see the banner at the top)."
+}
+
+/**
+ * All the git work lives here. It only uses JGit and java.io, so the Android app and
+ * the desktop app share it, and it can be tested on a normal computer.
  */
 object GitEngine {
 
@@ -76,7 +91,7 @@ object GitEngine {
         val remoteUrl: String?,
         val changedFiles: Int,
         val error: String? = null,
-        /** Commits made on this phone that the server doesn't have yet (as of the last fetch). */
+        /** Commits made on this device that the server doesn't have yet (as of the last fetch). */
         val unpushed: Int = 0,
     )
 
@@ -153,7 +168,7 @@ object GitEngine {
                 if (isSsh(url)) {
                     return SyncOutcome(
                         false, "SSH remote not supported",
-                        listOf("The remote is $url", "Tap the repo, then 'Switch remote to HTTPS'."),
+                        listOf("The remote is $url", "${Wording.tap} the repo, then 'Switch remote to HTTPS'."),
                     )
                 }
                 val host = hostOf(url)
@@ -162,7 +177,7 @@ object GitEngine {
 
                 val fullBranch = repo.fullBranch
                 if (fullBranch == null || !fullBranch.startsWith(Constants.R_HEADS)) {
-                    return SyncOutcome(false, "Not on a branch", listOf("HEAD is detached. Check out a branch in Termux first."))
+                    return SyncOutcome(false, "Not on a branch", listOf("HEAD is detached. Check out a branch in ${Wording.terminal} first."))
                 }
                 val branch = Repository.shortenRefName(fullBranch)
                 val remoteBranch = repo.config.getString("branch", branch, "merge")
@@ -177,7 +192,7 @@ object GitEngine {
                     return SyncOutcome(
                         false, "Unfinished conflict",
                         listOf("These files still have conflict markers:") + status.conflicting.map { "• $it" } +
-                            "Fix them in Termux (git status), then sync again.",
+                            "Fix them in ${Wording.terminal} (git status), then sync again.",
                     )
                 }
                 if (changed > 0) {
@@ -228,10 +243,10 @@ object GitEngine {
                                 return SyncOutcome(
                                     false, "Conflict, nothing was pushed",
                                     notes + listOf(
-                                        "The server and your phone both changed the same lines in:",
+                                        "The server and your ${Wording.device} both changed the same lines in:",
                                     ) + files.distinct().map { "• $it" } + listOf(
                                         "Your work is safe: your commit is still here, just not merged.",
-                                        "Fix it in Termux: git pull --rebase, edit the files, git add, git rebase --continue.",
+                                        "Fix it in ${Wording.terminal}: git pull --rebase, edit the files, git add, git rebase --continue.",
                                     ),
                                 )
                             }
@@ -335,7 +350,7 @@ object GitEngine {
     // ---------- helpers ----------
 
     fun defaultCommitMessage(): String =
-        "Sync from phone " + SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+        "Sync from ${Wording.device} " + SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
 
     private fun identityFor(repo: Repository, fallback: Identity): Identity {
         val name = repo.config.getString("user", null, "name")
@@ -392,8 +407,11 @@ object GitEngine {
             "timed out" in lower || "timeout" in lower -> "The server took too long to answer. Try again."
             "not found" in lower && e is TransportException ->
                 "The server says this repo doesn't exist (or the token can't see it). Check the remote URL."
-            "permission denied" in lower || "eacces" in lower ->
-                "Android blocked access to the folder. Give the app 'All files access' (see the banner at the top)."
+            "permission denied" in lower || "eacces" in lower -> Wording.folderBlocked
+            "gpg.format" in lower ->
+                "This repo's own git settings ask for signed commits, which NestSync can't make. " +
+                    "In ${Wording.terminal}, inside the repo, run: git config commit.gpgsign false " +
+                    "and git config --unset gpg.format"
             else -> e.javaClass.simpleName + ": " + (e.message ?: "unknown error")
         }
     }
