@@ -1,10 +1,15 @@
 package io.github.techynature.nestsync
 
 import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.lib.Config
 import org.eclipse.jgit.lib.RepositoryState
+import org.eclipse.jgit.storage.file.FileBasedConfig
+import org.eclipse.jgit.util.FS
+import org.eclipse.jgit.util.SystemReader
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -135,5 +140,58 @@ class GitEngineTest {
         assertEquals("https://git.gay/me/story.git", GitEngine.sshToHttps("ssh://git@git.gay/me/story.git"))
         assertFalse(GitEngine.isSsh("https://git.gay/me/story.git"))
         assertEquals("git.gay", GitEngine.hostOf("https://git.gay/me/story.git"))
+    }
+
+    // ---------- global git settings on a computer ----------
+
+    /** Pretends ~/.gitconfig is [file], so the test doesn't depend on the machine running it. */
+    private class FakeHomeReader(private val file: File) : SystemReader() {
+        private val base = SystemReader.getInstance()
+        override fun getHostname(): String = base.hostname
+        override fun getenv(variable: String?): String? = base.getenv(variable)
+        override fun getProperty(key: String?): String? = base.getProperty(key)
+        override fun getCurrentTime(): Long = base.currentTime
+        override fun getTimezone(`when`: Long): Int = base.getTimezone(`when`)
+        override fun openSystemConfig(parent: Config?, fs: FS?): FileBasedConfig = base.openSystemConfig(parent, fs)
+        override fun openJGitConfig(parent: Config?, fs: FS?): FileBasedConfig = base.openJGitConfig(parent, fs)
+        override fun openUserConfig(parent: Config?, fs: FS?): FileBasedConfig = FileBasedConfig(parent, file, fs)
+    }
+
+    @After
+    fun resetGitSettings() {
+        SystemReader.setInstance(null)
+    }
+
+    @Test
+    fun sshSigningInGlobalSettingsDoesNotBreakSync() {
+        val (_, a, _) = setup()
+        val globalConfig = tmp.newFile("gitconfig")
+        val original = """
+            [user]
+            	name = Global Name
+            	email = global@example.com
+            [gpg]
+            	format = ssh
+            [commit]
+            	gpgsign = true
+        """.trimIndent() + "\n"
+        globalConfig.writeText(original)
+
+        // Without the fix, JGit can't read gpg.format = ssh and the sync fails.
+        SystemReader.setInstance(FakeHomeReader(globalConfig))
+        File(a, "one.tw").writeText("1\n")
+        val before = sync(a)
+        assertFalse(before.ok)
+        assertTrue(before.details.toString(), before.details.any { "signed commits" in it })
+
+        // With it, the sync works, and the commit uses the global name.
+        SystemReader.setInstance(CommitSigning.IgnoreSigningReader(FakeHomeReader(globalConfig)))
+        val after = GitEngine.sync(a, noCreds, me)
+        assertTrue(after.details.toString(), after.ok)
+        Git.open(a).use { g ->
+            assertEquals("Global Name", g.log().setMaxCount(1).call().first().authorIdent.name)
+        }
+        // And the real settings file is untouched.
+        assertEquals(original, globalConfig.readText())
     }
 }

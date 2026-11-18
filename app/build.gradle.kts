@@ -86,9 +86,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    // Pure-Java git. 5.13 is the newest line that runs on Android without extra Java 11 APIs.
-    implementation("org.eclipse.jgit:org.eclipse.jgit:5.13.3.202401111512-r")
+    // The git engine (and JGit) lives in :core, shared with the desktop app.
+    implementation(project(":core"))
     implementation("org.slf4j:slf4j-nop:1.7.36")
-
-    testImplementation("junit:junit:4.13.2")
 }

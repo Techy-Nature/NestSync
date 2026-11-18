@@ -1,0 +1,4 @@
+#!/bin/sh
+# Entry point of the AppImage: starts the NestSync launcher that sits next to this file.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/bin/NestSync" "$@"
