@@ -123,8 +123,8 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build the app and the DMG
-        run: ./gradlew --no-daemon :desktop:createDistributable :desktop:packageDmg
+      - name: Build the app
+        run: ./gradlew --no-daemon :desktop:createDistributable
 
       - name: Self-test (a real sync and an HTTPS check, no window)
         run: desktop/build/compose/binaries/main/app/NestSync.app/Contents/MacOS/NestSync --self-test
@@ -144,11 +144,20 @@ jobs:
             exit 1
           fi
 
-      - name: Show the app's signature (unsigned builds are signed "ad-hoc")
-        run: codesign -dv desktop/build/compose/binaries/main/app/NestSync.app 2>&1 || true
+      - name: Sign ad-hoc and make the DMG (app + "Open NestSync" helper + Applications shortcut)
+        run: desktop/packaging/macos/make-dmg.sh "NestSync-mac-${{ matrix.label }}.dmg"
 
-      - name: Name the DMG
-        run: cp desktop/build/compose/binaries/main/dmg/NestSync-*.dmg "NestSync-mac-${{ matrix.label }}.dmg"
+      - name: Check the DMG
+        run: |
+          mnt="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "NestSync-mac-${{ matrix.label }}.dmg"
+          ls -la "$mnt"
+          test -x "$mnt/Open NestSync.command"
+          test -L "$mnt/Applications"
+          codesign --verify --deep --strict --verbose=2 "$mnt/NestSync.app"
+          codesign -dv "$mnt/NestSync.app" 2>&1 | grep -E "Signature=adhoc|Identifier="
+          "$mnt/NestSync.app/Contents/MacOS/NestSync" --self-test
+          hdiutil detach "$mnt"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -177,7 +186,7 @@ jobs:
 
             **Linux:** download **NestSync-x86_64.AppImage**, make it executable, and open it.
 
-            **Mac:** download **NestSync-mac-AppleSilicon.dmg** (M1 and newer) or **NestSync-mac-Intel.dmg** (older Macs). The app isn't signed by Apple yet, so the first time you open it, go to **System Settings → Privacy & Security** and click **Open Anyway**.
+            **Mac:** download **NestSync-mac-AppleSilicon.dmg** (M1 and newer) or **NestSync-mac-Intel.dmg** (older Macs), open it and drag **NestSync** into **Applications**. The app isn't signed with a paid Apple Developer ID, so the first time, double-click **Open NestSync** in the DMG (or paste one Terminal command). The README has both ways, step by step.
 
             Full steps are in the [README](https://github.com/Techy-Nature/NestSync#readme).
           files: |

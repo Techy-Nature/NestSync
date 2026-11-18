@@ -132,21 +132,38 @@ To update, download the newest AppImage and replace the old file. Your repos and
    - **NestSync-mac-AppleSilicon.dmg** for Macs with an M1, M2, M3 or newer chip.
    - **NestSync-mac-Intel.dmg** for older Intel Macs.
    - Not sure? Open the Apple menu → **About This Mac**. "Chip: Apple M…" means Apple Silicon; "Processor: Intel" means Intel.
-3. Open the DMG and drag **NestSync** into **Applications**.
-4. Open **NestSync** from Applications. The first time, macOS says it can't check the app for malware, because the app isn't signed with an Apple Developer account yet. That's expected:
-   1. Click **Done** (or **OK**) on that message.
-   2. Open **System Settings** → **Privacy & Security**.
-   3. Scroll down to the message about **NestSync** and click **Open Anyway**.
-   4. Enter your Mac password, then click **Open Anyway** once more.
+3. Open the DMG. Inside are **NestSync**, **Open NestSync** and a shortcut to **Applications**.
+4. Drag **NestSync** onto the **Applications** shortcut.
 
-   You only do this once. After that it opens normally.
+NestSync isn't signed with a paid Apple Developer ID (99 US dollars a year), so the first time, macOS won't open it with a plain double-click. It is signed "ad-hoc" (a free signature that Apple Silicon Macs need), and there are two free ways past the warning. You only do this once. After that NestSync opens from Applications like any other app.
 
-> If macOS instead says the app **"is damaged and can't be opened"**, open **Terminal** and run this, then open NestSync again:
-> ```
-> xattr -dr com.apple.quarantine /Applications/NestSync.app
-> ```
+#### Way 1: the Open NestSync helper
 
-To update, download the newest DMG and drag NestSync into Applications again, choosing **Replace**.
+5. In the DMG window, double-click **Open NestSync**.
+6. macOS asks about the helper itself the first time, because it was downloaded too:
+   - **macOS 15 (Sequoia) or newer:** click **Done**, open **System Settings** → **Privacy & Security**, scroll down to the message about **Open NestSync**, click **Open Anyway**, enter your Mac password, then click **Open Anyway** once more.
+   - **macOS 14 (Sonoma) or older:** right-click (or Control-click) **Open NestSync**, choose **Open**, then click **Open** in the message.
+7. A Terminal window opens, gets NestSync ready and opens it. You can close the Terminal window.
+
+If it says NestSync is "still inside the disk image", you skipped step 4: drag NestSync into Applications, then double-click **Open NestSync** again.
+
+#### Way 2: one Terminal command
+
+5. Open **Terminal** (press ⌘ Space, type **Terminal**, press Return).
+6. Paste this line and press Return:
+   ```
+   xattr -cr /Applications/NestSync.app && open /Applications/NestSync.app
+   ```
+7. NestSync opens. You can close Terminal.
+
+That's the same thing the helper does. If macOS still says NestSync **"is damaged and can't be opened"**, paste this one instead, which also re-signs the app on your Mac:
+```
+xattr -cr /Applications/NestSync.app && codesign --force --deep --sign - /Applications/NestSync.app && open /Applications/NestSync.app
+```
+
+> You can also skip both and use **System Settings** → **Privacy & Security** → **Open Anyway** on NestSync itself, the same way as step 6 of Way 1.
+
+To update, download the newest DMG and drag NestSync into Applications again, choosing **Replace**. A new copy needs Way 1 or Way 2 once more.
 
 ### Set it up on a computer
 
@@ -177,6 +194,7 @@ The steps are the same as on the phone, with a couple of differences:
 | **Your computer blocked access to the folder** | Make sure your account can read and write that folder. On a Mac, check **System Settings → Privacy & Security → Files and Folders** for NestSync. |
 | **This repo's own git settings ask for signed commits** | In a terminal, inside the repo, run `git config commit.gpgsign false` and `git config --unset gpg.format`. |
 | **Can't reach the server** | Check your internet connection. |
+| **Mac: "NestSync can't be opened" or "is damaged"** | Use **Way 1** or **Way 2** under [Install on a Mac](#install-on-a-mac). A newly downloaded copy needs it once more. |
 
 ## How the apps are built
 
@@ -233,7 +251,8 @@ desktop/packaging/linux/build-appimage.sh
 **Mac DMG** (on a Mac):
 
 ```
-./gradlew :desktop:packageDmg
+./gradlew :desktop:createDistributable
+desktop/packaging/macos/make-dmg.sh NestSync-mac.dmg
 ```
 
-The DMG lands in `desktop/build/compose/binaries/main/dmg/`. See [docs/DESKTOP.md](docs/DESKTOP.md) for more.
+That signs the app ad-hoc and makes `NestSync-mac.dmg` with the app, the **Open NestSync** helper and an Applications shortcut. See [docs/DESKTOP.md](docs/DESKTOP.md) for more.

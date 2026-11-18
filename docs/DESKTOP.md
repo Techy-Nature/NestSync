@@ -60,17 +60,45 @@ The script downloads `appimagetool` each time, puts `AppRun`, `nestsync.desktop`
 
 **Mac DMG** (on a Mac):
 
-```
-./gradlew :desktop:packageDmg
-```
+1. Build the app:
+   ```
+   ./gradlew :desktop:createDistributable
+   ```
+2. Sign it ad-hoc and pack the DMG:
+   ```
+   desktop/packaging/macos/make-dmg.sh NestSync-mac.dmg
+   ```
+3. `NestSync-mac.dmg` appears where you ran it.
 
-The DMG appears in `desktop/build/compose/binaries/main/dmg/`. A DMG built on an Apple Silicon Mac only runs on Apple Silicon Macs, and one built on an Intel Mac only on Intel Macs. That's why the workflow builds both.
+The script signs `NestSync.app` ad-hoc (`codesign --force --deep --sign -`), checks the signature, and packs a DMG with three things in it: the app, the **Open NestSync** helper (`desktop/packaging/macos/Open NestSync.command`) and a shortcut to Applications.
+
+A DMG built on an Apple Silicon Mac only runs on Apple Silicon Macs, and one built on an Intel Mac only on Intel Macs. That's why the workflow builds both.
+
+`./gradlew :desktop:packageDmg` still works for a quick local DMG, but it doesn't include the helper.
 
 **Version numbers:** on GitHub Actions every file gets `1.0.<run number>`, the same as the APK. Local builds are `1.0.1`.
 
+## Opening the Mac app without a paid Apple account
+
+### What the build does
+
+- **Ad-hoc signature.** `make-dmg.sh` signs the whole app, Java runtime included, with `codesign --sign -`. That's free and needs no Apple account. Apple Silicon Macs refuse to run code with no signature at all, and a whole-app ad-hoc signature avoids the "is damaged" message that a half-signed app can trigger. It does **not** say who made the app, so Gatekeeper still blocks the first open of a downloaded copy.
+- **The Open NestSync helper.** A small script in the DMG. When double-clicked, it finds `NestSync.app` in `/Applications` (or `~/Applications`), removes the "downloaded from the internet" mark (`xattr -cr`), re-signs the app ad-hoc on that Mac if the signature doesn't check out, and opens it. It refuses to run on the copy inside the DMG, because a DMG is read-only, and tells the person to drag the app to Applications first.
+
+### What it can't do
+
+Everything inside a downloaded DMG carries the same "downloaded from the internet" mark, **the helper included**. So the helper doesn't remove the warning entirely: it moves it from the app to the helper, once.
+
+- On **macOS 15 (Sequoia) and newer**, Apple removed the right-click → Open shortcut. The first double-click on the helper is blocked, and the person has to click **Open Anyway** in **System Settings → Privacy & Security** once. That's the same number of steps as doing it for the app directly. The helper's real gain there is that it also fixes the "is damaged" case.
+- On **macOS 14 (Sonoma) and older**, right-click → **Open** on the helper works without visiting System Settings.
+- The **one Terminal command** in the README (`xattr -cr /Applications/NestSync.app && open /Applications/NestSync.app`) skips Gatekeeper's prompt completely, because text pasted into Terminal isn't a downloaded file. For people comfortable with Terminal it's the fastest way.
+- Every new download needs this again once. Updating by replacing the app in Applications brings the mark back.
+
+Only a Developer ID signature plus notarization makes a downloaded Mac app open with a plain double-click. That's the next section.
+
 ## Mac signing and notarization (for later)
 
-Right now the Mac app is **unsigned** (only "ad-hoc" signed, which is what the build tools do by default). That's why people have to click **Open Anyway** in System Settings the first time. Nothing is wrong with the app; macOS just can't tell who made it.
+Right now the Mac app is only signed **ad-hoc** (see above). That's why people need the helper, the Terminal command or **Open Anyway** the first time. Nothing is wrong with the app; macOS just can't tell who made it.
 
 To get rid of that step, the app has to be **signed** with an Apple Developer ID and **notarized** (scanned by Apple). That needs a paid **Apple Developer Program** membership (99 US dollars a year).
 
@@ -98,6 +126,7 @@ Once there's a membership, the steps are:
        teamID.set(System.getenv("APPLE_TEAM_ID"))
    }
    ```
-6. **Import the certificate in the workflow.** In the `macos` job, before "Build the app and the DMG", add a step that imports the `.p12` into a temporary keychain (the [`apple-actions/import-codesign-certs`](https://github.com/Apple-Actions/import-codesign-certs) action does this), pass the secrets as environment variables to the build step, and add `:desktop:notarizeDmg` after `:desktop:packageDmg`.
+6. **Import the certificate in the workflow.** In the `macos` job, before "Build the app", add a step that imports the `.p12` into a temporary keychain (the [`apple-actions/import-codesign-certs`](https://github.com/Apple-Actions/import-codesign-certs) action does this) and pass the secrets as environment variables to the build step.
+7. **Switch the DMG step back to Gradle.** Replace the "Sign ad-hoc and make the DMG" step with `./gradlew --no-daemon :desktop:packageDmg :desktop:notarizeDmg`, and copy the DMG from `desktop/build/compose/binaries/main/dmg/` to `NestSync-mac-<label>.dmg` as before. A Developer ID signature replaces the ad-hoc one, and the **Open NestSync** helper is no longer needed.
 
 After that, the Mac app opens with a double-click like any other app. The Linux AppImage doesn't need signing.
