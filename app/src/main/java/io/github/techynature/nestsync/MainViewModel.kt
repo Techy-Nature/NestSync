@@ -98,7 +98,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sync(repo: RepoEntry) {
+    fun sync(repo: RepoEntry, onConflict: ConflictChoice = ConflictChoice.STOP) {
         if (busy.containsKey(repo.id)) return
         busy[repo.id] = "Starting…"
         viewModelScope.launch {
@@ -107,6 +107,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     folder = File(repo.path),
                     credentials = { host -> credentialStore.forHost(host) },
                     fallbackIdentity = settings.identity,
+                    onConflict = onConflict,
                     progress = { msg -> viewModelScope.launch(Dispatchers.Main) { if (busy.containsKey(repo.id)) busy[repo.id] = msg } },
                 )
             }

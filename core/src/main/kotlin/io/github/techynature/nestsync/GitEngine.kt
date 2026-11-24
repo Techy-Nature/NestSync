@@ -4,6 +4,7 @@ import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.RebaseCommand
 import org.eclipse.jgit.api.RebaseResult
 import org.eclipse.jgit.api.errors.TransportException
+import org.eclipse.jgit.dircache.DirCacheEntry
 import org.eclipse.jgit.lib.Constants
 import org.eclipse.jgit.lib.PersonIdent
 import org.eclipse.jgit.lib.Repository
@@ -13,6 +14,7 @@ import org.eclipse.jgit.transport.RemoteRefUpdate
 import org.eclipse.jgit.transport.URIish
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,6 +27,15 @@ data class SyncOutcome(val ok: Boolean, val title: String, val details: List<Str
 
 /** Who commits are made as, when the repo has no user.name / user.email of its own. */
 data class Identity(val name: String, val email: String)
+
+/**
+ * What a sync does when the server and this device changed the same lines of a file.
+ *  - STOP: undo the pull, change nothing, and list the files (the old behaviour).
+ *  - USE_SERVER: take the server's copy of those files. This device's copy is saved
+ *    to a backup folder first. Every other file still syncs both ways.
+ *  - KEEP_MINE: keep this device's copy of those files and upload it.
+ */
+enum class ConflictChoice { STOP, USE_SERVER, KEEP_MINE }
 
 /**
  * Words that differ between the Android app and the desktop app. Android keeps these
@@ -46,6 +57,9 @@ object Wording {
  * the desktop app share it, and it can be tested on a normal computer.
  */
 object GitEngine {
+
+    /** Title of a sync that stopped on a conflict. The apps show the conflict buttons when they see it. */
+    const val CONFLICT_TITLE = "Conflict, nothing was pulled or pushed"
 
     // ---------- URL helpers ----------
 
@@ -146,14 +160,16 @@ object GitEngine {
     /**
      * Same steps as the old Termux shortcut:
      *   git add -A ; git commit -m "..." ; git pull --rebase ; git push
-     * If the pull hits a conflict, the rebase is undone so nothing is lost, and the
-     * conflicting files are listed.
+     * If the pull hits a conflict, [onConflict] decides: STOP undoes the rebase so nothing
+     * is lost and lists the files; USE_SERVER or KEEP_MINE settles each clash that way and
+     * finishes the sync, so the rest of the server's changes still come down.
      */
     fun sync(
         folder: File,
         credentials: (host: String) -> HostCredential?,
         fallbackIdentity: Identity,
         commitMessage: String = defaultCommitMessage(),
+        onConflict: ConflictChoice = ConflictChoice.STOP,
         progress: (String) -> Unit = {},
     ): SyncOutcome {
         val notes = mutableListOf<String>()
@@ -229,24 +245,66 @@ object GitEngine {
                     val incoming = countCommits(git, headBefore, remoteId)
                     if (incoming > 0) {
                         progress("Pulling $incoming new commit(s)…")
-                        val result = git.rebase().setUpstream(trackingRef).call()
+                        var result = git.rebase().setUpstream(trackingRef).call()
+                        val chosen = mutableListOf<String>()
+                        var backupDir: File? = null
+                        var rounds = 0
+                        // Each local commit that clashes stops the rebase once; settle it and go on.
+                        while (result.status == RebaseResult.Status.STOPPED && onConflict != ConflictChoice.STOP && rounds < 500) {
+                            rounds++
+                            val files = git.status().call().conflicting.sorted()
+                            if (files.isEmpty()) {
+                                // Stopped with nothing to settle (for example an empty commit): just move on.
+                                result = git.rebase().setOperation(RebaseCommand.Operation.SKIP).call()
+                                continue
+                            }
+                            if (onConflict == ConflictChoice.USE_SERVER && backupDir == null) {
+                                backupDir = backupFolder(folder)
+                            }
+                            for (path in files) settleConflict(git, path, onConflict, backupDir)
+                            chosen += files
+                            result = git.rebase().setOperation(RebaseCommand.Operation.CONTINUE).call()
+                            // Taking the server's copy can leave a local commit with nothing in it.
+                            // The rebase then waits for that commit to be dropped.
+                            while (result.status == RebaseResult.Status.NOTHING_TO_COMMIT &&
+                                repo.repositoryState.isRebasing && rounds < 500
+                            ) {
+                                rounds++
+                                result = git.rebase().setOperation(RebaseCommand.Operation.SKIP).call()
+                            }
+                        }
                         when (result.status) {
                             RebaseResult.Status.OK,
                             RebaseResult.Status.FAST_FORWARD,
                             RebaseResult.Status.UP_TO_DATE,
-                            RebaseResult.Status.NOTHING_TO_COMMIT -> notes += "Pulled $incoming commit(s)"
+                            RebaseResult.Status.NOTHING_TO_COMMIT -> {
+                                notes += "Pulled $incoming commit(s)"
+                                if (chosen.isNotEmpty()) {
+                                    val files = chosen.distinct()
+                                    notes += if (onConflict == ConflictChoice.USE_SERVER) {
+                                        "Used the server's copy of:"
+                                    } else {
+                                        "Kept your ${Wording.device}'s copy of:"
+                                    }
+                                    notes += files.map { "• $it" }
+                                    if (onConflict == ConflictChoice.USE_SERVER && backupDir != null) {
+                                        notes += "Your ${Wording.device}'s old copy is saved in ${backupDir.path}"
+                                    }
+                                }
+                            }
                             RebaseResult.Status.STOPPED,
                             RebaseResult.Status.CONFLICTS -> {
                                 val files = (result.conflicts ?: emptyList()) +
                                     git.status().call().conflicting
                                 abortRebaseQuietly(git)
                                 return SyncOutcome(
-                                    false, "Conflict, nothing was pushed",
+                                    false, CONFLICT_TITLE,
                                     notes + listOf(
                                         "The server and your ${Wording.device} both changed the same lines in:",
                                     ) + files.distinct().map { "• $it" } + listOf(
                                         "Your work is safe: your commit is still here, just not merged.",
-                                        "Fix it in ${Wording.terminal}: git pull --rebase, edit the files, git add, git rebase --continue.",
+                                        "Until this is settled, new changes from the server can't come down.",
+                                        "Open the repo and pick 'Use server's copy' or 'Keep mine' to finish the sync.",
                                     ),
                                 )
                             }
@@ -380,6 +438,57 @@ object GitEngine {
     /** Commits reachable from [to] but not from [from]. */
     private fun countCommits(git: Git, from: org.eclipse.jgit.lib.ObjectId, to: org.eclipse.jgit.lib.ObjectId): Int =
         if (from == to) 0 else git.log().addRange(from, to).call().count()
+
+    /**
+     * Settles one conflicting file in the middle of a rebase. During a rebase, stage 2
+     * ("ours") is the server's side and stage 3 ("theirs") is the commit from this device.
+     */
+    private fun settleConflict(git: Git, path: String, choice: ConflictChoice, backupDir: File?) {
+        val repo = git.repository
+        val dc = repo.readDirCache()
+        var server: DirCacheEntry? = null
+        var mine: DirCacheEntry? = null
+        var i = dc.findEntry(path)
+        while (i in 0 until dc.entryCount && dc.getEntry(i).pathString == path) {
+            val e = dc.getEntry(i)
+            when (e.stage) {
+                DirCacheEntry.STAGE_2 -> server = e
+                DirCacheEntry.STAGE_3 -> mine = e
+            }
+            i++
+        }
+        if (choice == ConflictChoice.USE_SERVER && mine != null && backupDir != null) {
+            val copy = File(backupDir, path)
+            copy.parentFile?.mkdirs()
+            FileOutputStream(copy).use { repo.open(mine.objectId).copyTo(it) }
+        }
+        val keep = if (choice == ConflictChoice.USE_SERVER) server else mine
+        val target = File(repo.workTree, path)
+        if (keep == null) {
+            // That side deleted the file.
+            target.delete()
+            git.rm().addFilepattern(path).call()
+        } else {
+            target.parentFile?.mkdirs()
+            FileOutputStream(target).use { repo.open(keep.objectId).copyTo(it) }
+            git.add().addFilepattern(path).call()
+        }
+    }
+
+    /**
+     * A new folder for this device's copies of files the server's copy replaced. It sits
+     * next to the repo ("NestSync backups/<repo>/<time>") so it never gets synced or
+     * picked up by a build. If that can't be written, it goes inside .git instead.
+     */
+    private fun backupFolder(repoFolder: File): File {
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH-mm-ss", Locale.US).format(Date())
+        val parent = repoFolder.absoluteFile.parentFile
+        val beside = parent?.let { File(File(File(it, "NestSync backups"), repoFolder.name), stamp) }
+        if (beside != null && (beside.mkdirs() || beside.isDirectory)) return beside
+        val inside = File(File(File(repoFolder, ".git"), "nestsync-backups"), stamp)
+        inside.mkdirs()
+        return inside
+    }
 
     private fun abortRebaseQuietly(git: Git) {
         try {
