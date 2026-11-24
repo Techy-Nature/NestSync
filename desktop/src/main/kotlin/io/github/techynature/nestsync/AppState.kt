@@ -98,7 +98,7 @@ class AppState {
         }
     }
 
-    fun sync(repo: RepoEntry) {
+    fun sync(repo: RepoEntry, onConflict: ConflictChoice = ConflictChoice.STOP) {
         if (busy.containsKey(repo.id)) return
         busy[repo.id] = "Starting…"
         scope.launch {
@@ -107,6 +107,7 @@ class AppState {
                     folder = File(repo.path),
                     credentials = { host -> credentialStore.forHost(host) },
                     fallbackIdentity = settings.identity,
+                    onConflict = onConflict,
                     progress = { msg -> scope.launch { if (busy.containsKey(repo.id)) busy[repo.id] = msg } },
                 )
             }

@@ -104,6 +104,92 @@ class GitEngineTest {
         assertTrue(File(b, "story.tw").readText().contains("B's version"))
     }
 
+    /** A and B both edit story.tw; A also adds a new file. Returns (a, b) after B's sync stopped. */
+    private fun stuckOnConflict(): Pair<File, File> {
+        val (_, a, b) = setup()
+        File(a, "story.tw").writeText("line one\nA's version\n")
+        File(a, "mods/new.mod").apply { parentFile.mkdirs() }.writeText("new mod\n")
+        assertTrue(sync(a).ok)
+        File(b, "story.tw").writeText("line one\nB's version\n")
+        File(b, "notes.txt").writeText("B's other edit\n")
+        val first = sync(b)
+        assertEquals(GitEngine.CONFLICT_TITLE, first.title)
+        return a to b
+    }
+
+    @Test
+    fun conflictKeepsBlockingUntilSettled() {
+        val (_, b) = stuckOnConflict()
+        // Syncing again the old way still can't bring the new file down.
+        val again = sync(b)
+        assertEquals(GitEngine.CONFLICT_TITLE, again.title)
+        assertFalse(File(b, "mods/new.mod").exists())
+    }
+
+    @Test
+    fun useServerCopyBringsEverythingDown() {
+        val (a, b) = stuckOnConflict()
+        val r = GitEngine.sync(b, noCreds, me, onConflict = ConflictChoice.USE_SERVER)
+        assertTrue(r.details.toString(), r.ok)
+        // The server's changes came down, including the file that didn't clash.
+        assertEquals("line one\nA's version\n", File(b, "story.tw").readText())
+        assertTrue(File(b, "mods/new.mod").exists())
+        // B's copy was saved beside the repo, and B's other edit was still uploaded.
+        val backups = File(b.parentFile, "NestSync backups/${b.name}")
+        val saved = backups.walkTopDown().first { it.name == "story.tw" }
+        assertTrue(saved.readText().contains("B's version"))
+        Git.open(b).use { g ->
+            assertEquals(RepositoryState.SAFE, g.repository.repositoryState)
+            assertTrue(g.status().call().isClean)
+        }
+        assertTrue(sync(a).ok)
+        assertTrue(File(a, "notes.txt").exists())
+        assertEquals("line one\nA's version\n", File(a, "story.tw").readText())
+    }
+
+    @Test
+    fun keepMineUploadsThisDevicesCopy() {
+        val (a, b) = stuckOnConflict()
+        val r = GitEngine.sync(b, noCreds, me, onConflict = ConflictChoice.KEEP_MINE)
+        assertTrue(r.details.toString(), r.ok)
+        assertEquals("line one\nB's version\n", File(b, "story.tw").readText())
+        assertTrue(File(b, "mods/new.mod").exists())
+        assertTrue(sync(a).ok)
+        assertEquals("line one\nB's version\n", File(a, "story.tw").readText())
+    }
+
+    @Test
+    fun useServerCopyWhenServerDeletedTheFile() {
+        val (_, a, b) = setup()
+        File(a, "story.tw").delete()
+        assertTrue(sync(a).ok)
+        File(b, "story.tw").writeText("line one\nB's version\n")
+        assertEquals(GitEngine.CONFLICT_TITLE, sync(b).title)
+        val r = GitEngine.sync(b, noCreds, me, onConflict = ConflictChoice.USE_SERVER)
+        assertTrue(r.details.toString(), r.ok)
+        assertFalse(File(b, "story.tw").exists())
+        Git.open(b).use { g -> assertTrue(g.status().call().isClean) }
+    }
+
+    @Test
+    fun severalLocalCommitsWithConflicts() {
+        val (_, a, b) = setup()
+        File(a, "story.tw").writeText("line one\nA's version\n")
+        assertTrue(sync(a).ok)
+        // Two earlier local commits on B that never got pushed.
+        File(b, "story.tw").writeText("line one\nB first\n")
+        assertEquals(GitEngine.CONFLICT_TITLE, sync(b).title)
+        File(b, "story.tw").writeText("line one\nB second\n")
+        assertEquals(GitEngine.CONFLICT_TITLE, sync(b).title)
+        val r = GitEngine.sync(b, noCreds, me, onConflict = ConflictChoice.USE_SERVER)
+        assertTrue(r.details.toString(), r.ok)
+        assertEquals("line one\nA's version\n", File(b, "story.tw").readText())
+        Git.open(b).use { g ->
+            assertEquals(RepositoryState.SAFE, g.repository.repositoryState)
+            assertEquals(0, GitEngine.unpushedCount(g))
+        }
+    }
+
     @Test
     fun unpushedCommitsAreCounted() {
         val (_, a, _) = setup()

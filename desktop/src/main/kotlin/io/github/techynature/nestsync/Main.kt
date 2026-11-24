@@ -570,6 +570,24 @@ private fun RepoDetailDialog(state: AppState, repo: RepoEntry, onDismiss: () -> 
                         fontWeight = FontWeight.SemiBold,
                     )
                     current.lastDetails.forEach { Text(it, color = TextMain, fontSize = 14.sp) }
+                    if (current.lastOk == false && current.lastTitle == GitEngine.CONFLICT_TITLE) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Use server's copy: the server's version of those files comes down, your copy is " +
+                                "saved in a 'NestSync backups' folder next to the repo, and the rest syncs both ways.",
+                            color = TextDim, fontSize = 13.sp,
+                        )
+                        Button(onClick = { state.sync(current, ConflictChoice.USE_SERVER); onDismiss() }) {
+                            Text("Use server's copy")
+                        }
+                        Text(
+                            "Keep mine: your version of those files goes up and replaces the server's.",
+                            color = TextDim, fontSize = 13.sp,
+                        )
+                        TextButton(onClick = { state.sync(current, ConflictChoice.KEEP_MINE); onDismiss() }) {
+                            Text("Keep mine")
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(12.dp))

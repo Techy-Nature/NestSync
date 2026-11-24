@@ -178,7 +178,7 @@ The steps are the same as on the phone, with a couple of differences:
 - Logins are saved in `~/.config/NestSync/hosts.json` on Linux and `~/Library/Application Support/NestSync/hosts.json` on a Mac. The file can only be read by your own account (the same way git's own credential store and the GitHub CLI keep tokens). The phone app encrypts them with the Android Keystore instead; computers don't have that.
 - NestSync reads your normal git settings (`~/.gitconfig`), so commits use your usual name and email. It never signs commits, so if you sign commits on the command line, NestSync's commits will be unsigned. Your `~/.gitconfig` is never changed.
 - Commit messages say "Sync from computer …" instead of "Sync from phone …".
-- If a conflict happens, fix it in a terminal the same way as in the table below, then click **Sync** again.
+- If a conflict happens, click the repo and pick **Use server's copy** or **Keep mine** (see the table below).
 
 ---
 
@@ -189,7 +189,7 @@ The steps are the same as on the phone, with a couple of differences:
 | **The server refused the login** | The token for that server is wrong or expired. Make a new one and update it in Settings. |
 | **The token works but isn't allowed** | The token needs **write** access to repositories. |
 | **SSH remote not supported** | Tap the repo, then **Switch remote to HTTPS**. |
-| **Conflict, nothing was pushed** | The same lines changed on the server and on your phone. Nothing is lost: your commit stays on the phone. Fix it in Termux: `git pull --rebase`, edit the listed files, `git add .`, `git rebase --continue`, then Sync again. |
+| **Conflict, nothing was pulled or pushed** | The same lines changed on the server and on your phone. Until it's settled, nothing new can come down from the server. Nothing is lost: your commit stays on the phone. Tap the repo, then pick one:<br>**Use server's copy**: the server's version of those files comes down, your version is saved in `NestSync backups/<repo>/<time>` next to the repo folder, and everything else syncs both ways.<br>**Keep mine**: your version goes up and replaces the server's.<br>Or fix it by hand in Termux: `git pull --rebase`, edit the listed files, `git add .`, `git rebase --continue`, then Sync again. |
 | **Android blocked access to the folder** | Redo step 2 (All files access). |
 | **Your computer blocked access to the folder** | Make sure your account can read and write that folder. On a Mac, check **System Settings → Privacy & Security → Files and Folders** for NestSync. |
 | **This repo's own git settings ask for signed commits** | In a terminal, inside the repo, run `git config commit.gpgsign false` and `git config --unset gpg.format`. |
