@@ -17,6 +17,8 @@ data class RepoEntry(
     val lastTitle: String? = null,
     val lastDetails: List<String> = emptyList(),
     val lastTime: Long = 0L,
+    /** The files the last sync stopped on, so the repo screen can offer a choice for each. */
+    val lastClashes: List<Clash> = emptyList(),
 )
 
 /** Where NestSync keeps its own files on this computer. */
@@ -81,6 +83,7 @@ class RepoStore {
                     lastTitle = o.optString("lastTitle").takeIf { it.isNotEmpty() },
                     lastDetails = if (details == null) emptyList() else (0 until details.length()).map { details.getString(it) },
                     lastTime = o.optLong("lastTime", 0L),
+                    lastClashes = readClashes(o),
                 )
             }
         } catch (e: Exception) {
@@ -99,9 +102,22 @@ class RepoStore {
             r.lastTitle?.let { o.put("lastTitle", it) }
             o.put("lastDetails", JSONArray(r.lastDetails))
             o.put("lastTime", r.lastTime)
+            o.put(
+                "lastClashes",
+                JSONArray(r.lastClashes.map { JSONObject().put("path", it.path).put("kind", it.kind.name) }),
+            )
             arr.put(o)
         }
         AppDirs.writeAtomically(file, arr.toString(2))
+    }
+
+    private fun readClashes(o: JSONObject): List<Clash> {
+        val arr = o.optJSONArray("lastClashes") ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val c = arr.optJSONObject(i) ?: return@mapNotNull null
+            val kind = runCatching { ClashKind.valueOf(c.optString("kind")) }.getOrDefault(ClashKind.BOTH_CHANGED)
+            c.optString("path").takeIf { it.isNotEmpty() }?.let { Clash(it, kind) }
+        }
     }
 }
 

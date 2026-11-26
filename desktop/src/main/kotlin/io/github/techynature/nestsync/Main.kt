@@ -47,6 +47,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -64,6 +65,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -396,6 +398,16 @@ private fun RepoCard(
                     color = Warn, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 )
             }
+            if (info != null && info.halfDone) {
+                Text(
+                    if (info.clashes.isEmpty()) {
+                        "A pull was left half-done · Sync to finish it"
+                    } else {
+                        "A pull was left half-done · ${info.clashes.size} file(s) to choose"
+                    },
+                    color = Warn, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                )
+            }
 
             if (repo.lastTitle != null && busyText == null) {
                 Spacer(Modifier.height(6.dp))
@@ -562,6 +574,10 @@ private fun RepoDetailDialog(state: AppState, repo: RepoEntry, onDismiss: () -> 
                     }) { Text("Switch remote to HTTPS") }
                 }
 
+                // Files to choose for: a pull left half-done right now, or the last sync's clash list.
+                val lastWasConflict = current.lastOk == false && current.lastTitle?.startsWith("Conflict") == true
+                val clashes = info?.clashes.orEmpty().ifEmpty { if (lastWasConflict) current.lastClashes else emptyList() }
+
                 if (current.lastTitle != null) {
                     Label("Last sync")
                     Text(
@@ -569,24 +585,43 @@ private fun RepoDetailDialog(state: AppState, repo: RepoEntry, onDismiss: () -> 
                         color = if (current.lastOk == true) Good else Bad,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    current.lastDetails.forEach { Text(it, color = TextMain, fontSize = 14.sp) }
-                    if (current.lastOk == false && current.lastTitle == GitEngine.CONFLICT_TITLE) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "Use server's copy: the server's version of those files comes down, your copy is " +
-                                "saved in a 'NestSync backups' folder next to the repo, and the rest syncs both ways.",
-                            color = TextDim, fontSize = 13.sp,
-                        )
-                        Button(onClick = { state.sync(current, ConflictChoice.USE_SERVER); onDismiss() }) {
-                            Text("Use server's copy")
-                        }
-                        Text(
-                            "Keep mine: your version of those files goes up and replaces the server's.",
-                            color = TextDim, fontSize = 13.sp,
-                        )
-                        TextButton(onClick = { state.sync(current, ConflictChoice.KEEP_MINE); onDismiss() }) {
-                            Text("Keep mine")
-                        }
+                    // With the chooser below, the file list would only repeat it.
+                    current.lastDetails
+                        .filterNot { clashes.isNotEmpty() && it.startsWith("• ") }
+                        .forEach { Text(it, color = TextMain, fontSize = 14.sp) }
+                }
+
+                if (clashes.isNotEmpty()) {
+                    ClashChooser(clashes) { picks -> state.sync(current, choices = picks); onDismiss() }
+                } else if (info?.halfDone == true) {
+                    Label("Half-done pull")
+                    Text(
+                        "A pull was left half-done, but nothing is left to choose. Finish sync completes it and uploads.",
+                        color = TextDim, fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { state.sync(current); onDismiss() },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = OnAccent),
+                    ) { Text("Finish sync", fontWeight = FontWeight.Bold) }
+                } else if (lastWasConflict) {
+                    // An older sync that didn't save its file list: one choice for every file.
+                    Label("Choose what to keep")
+                    Text(
+                        "Sync again to see each file and choose one by one, or pick one side for every file:",
+                        color = TextDim, fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { state.sync(current, ConflictChoice.KEEP_MINE); onDismiss() },
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Keep mine", fontSize = 13.sp) }
+                        OutlinedButton(
+                            onClick = { state.sync(current, ConflictChoice.USE_SERVER); onDismiss() },
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Use server's", fontSize = 13.sp) }
                     }
                 }
 
@@ -614,6 +649,83 @@ private fun RepoDetailDialog(state: AppState, repo: RepoEntry, onDismiss: () -> 
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
     )
+}
+
+/**
+ * One row per clashing file with Keep mine / Use server's, plus shortcuts that pick one
+ * side for every file. Finish sync runs the sync with exactly these picks.
+ */
+@Composable
+private fun ClashChooser(clashes: List<Clash>, onFinish: (Map<String, ConflictChoice>) -> Unit) {
+    val picks = remember(clashes) { mutableStateMapOf<String, ConflictChoice>() }
+    Label("Choose what to keep")
+    Text(
+        "Pick whose copy stays for each file. When you pick the server's, your ${Wording.device}'s copy " +
+            "is saved first in a 'NestSync backups' folder next to the repo.",
+        color = TextDim, fontSize = 13.sp,
+    )
+    Spacer(Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { clashes.forEach { picks[it.path] = ConflictChoice.KEEP_MINE } },
+            modifier = Modifier.weight(1f),
+        ) { Text("All: keep mine", fontSize = 13.sp, textAlign = TextAlign.Center) }
+        OutlinedButton(
+            onClick = { clashes.forEach { picks[it.path] = ConflictChoice.USE_SERVER } },
+            modifier = Modifier.weight(1f),
+        ) { Text("All: use server's", fontSize = 13.sp, textAlign = TextAlign.Center) }
+    }
+    clashes.forEach { c ->
+        Spacer(Modifier.height(8.dp))
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceHigh),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Text(c.path, color = TextMain, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                Text(c.description, color = Warn, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    PickButton(c.keepMineLabel, picks[c.path] == ConflictChoice.KEEP_MINE, Modifier.weight(1f)) {
+                        picks[c.path] = ConflictChoice.KEEP_MINE
+                    }
+                    PickButton(c.useServerLabel, picks[c.path] == ConflictChoice.USE_SERVER, Modifier.weight(1f)) {
+                        picks[c.path] = ConflictChoice.USE_SERVER
+                    }
+                }
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    val picked = clashes.count { picks[it.path] != null }
+    val ready = picked == clashes.size
+    Button(
+        onClick = { onFinish(picks.toMap()) },
+        enabled = ready,
+        modifier = Modifier.fillMaxWidth().height(48.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = OnAccent),
+    ) {
+        Text(
+            if (ready) "Finish sync" else "Pick each file ($picked of ${clashes.size})",
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+/** A choice button: filled with a check mark when picked, outlined when not. */
+@Composable
+private fun PickButton(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            modifier = modifier,
+            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = OnAccent),
+        ) { Text("✓ $text", fontSize = 13.sp, textAlign = TextAlign.Center) }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) {
+            Text(text, fontSize = 13.sp, textAlign = TextAlign.Center)
+        }
+    }
 }
 
 @Composable
