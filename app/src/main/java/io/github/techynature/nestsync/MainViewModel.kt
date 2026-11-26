@@ -98,7 +98,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sync(repo: RepoEntry, onConflict: ConflictChoice = ConflictChoice.STOP) {
+    /**
+     * Syncs one repo. [onConflict] settles every clashing file one way; [choices] settles
+     * listed files one by one (it wins for the files it names).
+     */
+    fun sync(
+        repo: RepoEntry,
+        onConflict: ConflictChoice = ConflictChoice.STOP,
+        choices: Map<String, ConflictChoice> = emptyMap(),
+    ) {
         if (busy.containsKey(repo.id)) return
         busy[repo.id] = "Starting…"
         viewModelScope.launch {
@@ -108,6 +116,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     credentials = { host -> credentialStore.forHost(host) },
                     fallbackIdentity = settings.identity,
                     onConflict = onConflict,
+                    choices = choices,
                     progress = { msg -> viewModelScope.launch(Dispatchers.Main) { if (busy.containsKey(repo.id)) busy[repo.id] = msg } },
                 )
             }
@@ -117,6 +126,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 lastTitle = result.title,
                 lastDetails = result.details,
                 lastTime = System.currentTimeMillis(),
+                lastClashes = result.clashes,
             )
             updateRepos(repos.map { if (it.id == repo.id) updated else it })
             refresh(updated)

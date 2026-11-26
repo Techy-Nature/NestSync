@@ -8,6 +8,7 @@ import org.eclipse.jgit.dircache.DirCacheEntry
 import org.eclipse.jgit.lib.Constants
 import org.eclipse.jgit.lib.PersonIdent
 import org.eclipse.jgit.lib.Repository
+import org.eclipse.jgit.lib.RepositoryState
 import org.eclipse.jgit.transport.CredentialsProvider
 import org.eclipse.jgit.transport.RefSpec
 import org.eclipse.jgit.transport.RemoteRefUpdate
@@ -22,20 +23,71 @@ import java.util.Locale
 /** Username + token for one git host (for example "git.gay" or "github.com"). */
 data class HostCredential(val host: String, val username: String, val token: String)
 
-/** Outcome of one sync, shown to the person as-is. */
-data class SyncOutcome(val ok: Boolean, val title: String, val details: List<String>)
+/**
+ * Outcome of one sync, shown to the person as-is. When a sync stops on a clash,
+ * [clashes] lists each file so the apps can offer a choice per file.
+ */
+data class SyncOutcome(
+    val ok: Boolean,
+    val title: String,
+    val details: List<String>,
+    val clashes: List<Clash> = emptyList(),
+)
 
 /** Who commits are made as, when the repo has no user.name / user.email of its own. */
 data class Identity(val name: String, val email: String)
 
 /**
- * What a sync does when the server and this device changed the same lines of a file.
- *  - STOP: undo the pull, change nothing, and list the files (the old behaviour).
- *  - USE_SERVER: take the server's copy of those files. This device's copy is saved
- *    to a backup folder first. Every other file still syncs both ways.
- *  - KEEP_MINE: keep this device's copy of those files and upload it.
+ * What to do with a file that clashed (the server and this device both touched it).
+ *  - STOP: undo the pull, change nothing, and list the files so the person can choose.
+ *  - USE_SERVER: take the server's copy. This device's copy is saved to a backup folder first.
+ *  - KEEP_MINE: keep this device's copy and upload it.
+ * "Copy" includes "the file is gone": if the chosen side deleted the file, it gets deleted.
  */
 enum class ConflictChoice { STOP, USE_SERVER, KEEP_MINE }
+
+/** How a file clashed. "Mine" is this device, "server" is the branch on the server. */
+enum class ClashKind {
+    /** Both sides changed the file. */
+    BOTH_CHANGED,
+
+    /** This device deleted the file, the server changed it. */
+    MINE_DELETED,
+
+    /** The server deleted the file, this device changed it. */
+    SERVER_DELETED,
+
+    /** Both sides added a new file at the same path, with different contents. */
+    BOTH_ADDED,
+}
+
+/** One file that clashed, with plain words the apps show next to it. */
+data class Clash(val path: String, val kind: ClashKind) {
+    /** What happened to the file, in a few words. */
+    val description: String
+        get() = when (kind) {
+            ClashKind.BOTH_CHANGED -> "Changed on the server and on your ${Wording.device}."
+            ClashKind.MINE_DELETED -> "Deleted on your ${Wording.device}, but changed on the server."
+            ClashKind.SERVER_DELETED -> "Deleted on the server, but changed on your ${Wording.device}."
+            ClashKind.BOTH_ADDED -> "Added on the server and on your ${Wording.device}, with different contents."
+        }
+
+    /** Label for the "Keep mine" button, saying what it does when that means deleting. */
+    val keepMineLabel: String
+        get() = when (kind) {
+            ClashKind.MINE_DELETED -> "Keep mine (delete it)"
+            ClashKind.SERVER_DELETED -> "Keep mine (keep the file)"
+            else -> "Keep mine"
+        }
+
+    /** Label for the "Use server's" button, saying what it does when that means deleting. */
+    val useServerLabel: String
+        get() = when (kind) {
+            ClashKind.SERVER_DELETED -> "Use server's (delete it)"
+            ClashKind.MINE_DELETED -> "Use server's (keep the file)"
+            else -> "Use server's"
+        }
+}
 
 /**
  * Words that differ between the Android app and the desktop app. Android keeps these
@@ -58,8 +110,58 @@ object Wording {
  */
 object GitEngine {
 
-    /** Title of a sync that stopped on a conflict. The apps show the conflict buttons when they see it. */
+    /** Title of a sync that stopped on a clash. The apps show the per-file choices when they see it. */
     const val CONFLICT_TITLE = "Conflict, nothing was pulled or pushed"
+
+    /** Which way round the index stages are while git is stopped on a clash. */
+    private enum class Op {
+        /** git pull --rebase: stage 2 is the server's side, stage 3 is this device's commit. */
+        REBASE,
+
+        /** git pull (merge): stage 2 is this device's side, stage 3 is the server's. */
+        MERGE,
+    }
+
+    /** The person's choices for one sync: one per file, and a fallback for files not listed. */
+    private class Plan(val fallback: ConflictChoice, val perFile: Map<String, ConflictChoice>) {
+        fun choiceFor(path: String): ConflictChoice = perFile[path] ?: fallback
+        fun decides(clashes: List<Clash>): Boolean = clashes.none { choiceFor(it.path) == ConflictChoice.STOP }
+    }
+
+    /** What this sync settled, for the summary, plus where this device's replaced copies were saved. */
+    private class Settled(val repoFolder: File) {
+        val usedServer = linkedSetOf<String>()
+        val keptMine = linkedSetOf<String>()
+        var backupDir: File? = null
+
+        fun backupDir(): File = backupDir ?: backupFolder(repoFolder).also { backupDir = it }
+
+        /** Forget what was settled, after an undo put everything back. */
+        fun undo() {
+            usedServer.clear()
+            keptMine.clear()
+            backupDir?.let { dir ->
+                dir.deleteRecursively()
+                // Remove the repo's backup folder too if this left it empty.
+                dir.parentFile?.takeIf { it.list()?.isEmpty() == true }?.delete()
+            }
+            backupDir = null
+        }
+
+        fun notes(): List<String> {
+            val out = mutableListOf<String>()
+            if (usedServer.isNotEmpty()) {
+                out += "Used the server's copy of:"
+                out += usedServer.map { "• $it" }
+            }
+            if (keptMine.isNotEmpty()) {
+                out += "Kept your ${Wording.device}'s copy of:"
+                out += keptMine.map { "• $it" }
+            }
+            backupDir?.let { out += "Your ${Wording.device}'s replaced copies are saved in ${it.path}" }
+            return out
+        }
+    }
 
     // ---------- URL helpers ----------
 
@@ -107,6 +209,10 @@ object GitEngine {
         val error: String? = null,
         /** Commits made on this device that the server doesn't have yet (as of the last fetch). */
         val unpushed: Int = 0,
+        /** True when a pull was left half-done (for example by git pull --rebase in Termux). */
+        val halfDone: Boolean = false,
+        /** Files still waiting for a choice in that half-done pull. */
+        val clashes: List<Clash> = emptyList(),
     )
 
     fun inspect(folder: File): RepoInfo {
@@ -115,6 +221,14 @@ object GitEngine {
         return try {
             Git.open(folder).use { git ->
                 val repo = git.repository
+                val op = openPull(repo)
+                if (op != null) {
+                    // Mid-pull, HEAD isn't on the branch; show the branch the pull belongs to.
+                    return RepoInfo(
+                        true, halfDoneBranch(repo) ?: repo.branch, remoteUrl(repo), 0,
+                        halfDone = true, clashes = readClashes(repo, op),
+                    )
+                }
                 val status = git.status().call()
                 val changed = status.uncommittedChanges.size + status.untracked.size
                 RepoInfo(true, repo.branch, remoteUrl(repo), changed, unpushed = unpushedCount(git))
@@ -160,9 +274,13 @@ object GitEngine {
     /**
      * Same steps as the old Termux shortcut:
      *   git add -A ; git commit -m "..." ; git pull --rebase ; git push
-     * If the pull hits a conflict, [onConflict] decides: STOP undoes the rebase so nothing
-     * is lost and lists the files; USE_SERVER or KEEP_MINE settles each clash that way and
-     * finishes the sync, so the rest of the server's changes still come down.
+     *
+     * When files clash, each one is settled by its entry in [choices], or by [onConflict]
+     * when it has none. If any clash is left as STOP, the pull is undone so nothing is lost,
+     * and the outcome lists every clashing file so the person can choose.
+     *
+     * A pull that git left half-done (a rebase or merge stopped on a clash, for example
+     * from git pull --rebase in Termux) is finished first, with the same choices.
      */
     fun sync(
         folder: File,
@@ -170,9 +288,12 @@ object GitEngine {
         fallbackIdentity: Identity,
         commitMessage: String = defaultCommitMessage(),
         onConflict: ConflictChoice = ConflictChoice.STOP,
+        choices: Map<String, ConflictChoice> = emptyMap(),
         progress: (String) -> Unit = {},
     ): SyncOutcome {
         val notes = mutableListOf<String>()
+        val plan = Plan(onConflict, choices)
+        val settled = Settled(folder)
         try {
             if (!File(folder, ".git").exists()) {
                 return SyncOutcome(false, "Not a git repo", listOf("No .git folder in ${folder.path}"))
@@ -190,6 +311,21 @@ object GitEngine {
                 val host = hostOf(url)
                 val cred = host?.let(credentials)
                 val cp: CredentialsProvider? = cred?.let { UsernamePasswordCredentialsProvider(it.username, it.token) }
+
+                // 0. Finish a pull that git left half-done.
+                when (openPull(repo)) {
+                    Op.REBASE -> finishOpenRebase(git, plan, settled, notes, progress)?.let { return it }
+                    Op.MERGE -> finishOpenMerge(git, plan, settled, fallbackIdentity, notes, progress)?.let { return it }
+                    null -> if (repo.repositoryState != RepositoryState.SAFE) {
+                        return SyncOutcome(
+                            false, "Unfinished git step",
+                            listOf(
+                                "git is in the middle of something else: ${repo.repositoryState.description}.",
+                                "Finish or cancel it in ${Wording.terminal} (git status shows how), then sync again.",
+                            ),
+                        )
+                    }
+                }
 
                 val fullBranch = repo.fullBranch
                 if (fullBranch == null || !fullBranch.startsWith(Constants.R_HEADS)) {
@@ -215,8 +351,7 @@ object GitEngine {
                     progress("Committing $changed file(s)…")
                     git.add().addFilepattern(".").call()
                     git.add().addFilepattern(".").setUpdate(true).call() // picks up deletions
-                    val who = identityFor(repo, fallbackIdentity)
-                    val ident = PersonIdent(who.name, who.email)
+                    val ident = identFor(repo, fallbackIdentity)
                     git.commit().setMessage(commitMessage).setAuthor(ident).setCommitter(ident).call()
                     notes += "Committed $changed changed file(s)"
                 } else {
@@ -245,72 +380,20 @@ object GitEngine {
                     val incoming = countCommits(git, headBefore, remoteId)
                     if (incoming > 0) {
                         progress("Pulling $incoming new commit(s)…")
-                        var result = git.rebase().setUpstream(trackingRef).call()
-                        val chosen = mutableListOf<String>()
-                        var backupDir: File? = null
-                        var rounds = 0
-                        // Each local commit that clashes stops the rebase once; settle it and go on.
-                        while (result.status == RebaseResult.Status.STOPPED && onConflict != ConflictChoice.STOP && rounds < 500) {
-                            rounds++
-                            val files = git.status().call().conflicting.sorted()
-                            if (files.isEmpty()) {
-                                // Stopped with nothing to settle (for example an empty commit): just move on.
-                                result = git.rebase().setOperation(RebaseCommand.Operation.SKIP).call()
-                                continue
-                            }
-                            if (onConflict == ConflictChoice.USE_SERVER && backupDir == null) {
-                                backupDir = backupFolder(folder)
-                            }
-                            for (path in files) settleConflict(git, path, onConflict, backupDir)
-                            chosen += files
-                            result = git.rebase().setOperation(RebaseCommand.Operation.CONTINUE).call()
-                            // Taking the server's copy can leave a local commit with nothing in it.
-                            // The rebase then waits for that commit to be dropped.
-                            while (result.status == RebaseResult.Status.NOTHING_TO_COMMIT &&
-                                repo.repositoryState.isRebasing && rounds < 500
-                            ) {
-                                rounds++
-                                result = git.rebase().setOperation(RebaseCommand.Operation.SKIP).call()
-                            }
-                        }
-                        when (result.status) {
-                            RebaseResult.Status.OK,
-                            RebaseResult.Status.FAST_FORWARD,
-                            RebaseResult.Status.UP_TO_DATE,
-                            RebaseResult.Status.NOTHING_TO_COMMIT -> {
-                                notes += "Pulled $incoming commit(s)"
-                                if (chosen.isNotEmpty()) {
-                                    val files = chosen.distinct()
-                                    notes += if (onConflict == ConflictChoice.USE_SERVER) {
-                                        "Used the server's copy of:"
-                                    } else {
-                                        "Kept your ${Wording.device}'s copy of:"
-                                    }
-                                    notes += files.map { "• $it" }
-                                    if (onConflict == ConflictChoice.USE_SERVER && backupDir != null) {
-                                        notes += "Your ${Wording.device}'s old copy is saved in ${backupDir.path}"
-                                    }
-                                }
-                            }
-                            RebaseResult.Status.STOPPED,
-                            RebaseResult.Status.CONFLICTS -> {
-                                val files = (result.conflicts ?: emptyList()) +
-                                    git.status().call().conflicting
+                        val seen = linkedMapOf<String, Clash>()
+                        val result = driveRebase(git, git.rebase().setUpstream(trackingRef).call(), plan, settled, seen)
+                        when {
+                            rebaseFinished(repo, result) -> notes += "Pulled $incoming commit(s)"
+                            result.status == RebaseResult.Status.STOPPED && seen.isNotEmpty() -> {
                                 abortRebaseQuietly(git)
-                                return SyncOutcome(
-                                    false, CONFLICT_TITLE,
-                                    notes + listOf(
-                                        "The server and your ${Wording.device} both changed the same lines in:",
-                                    ) + files.distinct().map { "• $it" } + listOf(
-                                        "Your work is safe: your commit is still here, just not merged.",
-                                        "Until this is settled, new changes from the server can't come down.",
-                                        "Open the repo and pick 'Use server's copy' or 'Keep mine' to finish the sync.",
-                                    ),
-                                )
+                                settled.undo()
+                                return clashOutcome(notes, seen.values.toList())
                             }
                             else -> {
                                 abortRebaseQuietly(git)
-                                val failing = result.failingPaths?.keys?.joinToString(", ").orEmpty()
+                                settled.undo()
+                                val failing = (result.failingPaths?.keys.orEmpty() + result.conflicts.orEmpty())
+                                    .distinct().joinToString(", ")
                                 return SyncOutcome(
                                     false, "Pull failed (${result.status})",
                                     notes + listOfNotNull(
@@ -324,6 +407,7 @@ object GitEngine {
                         notes += "Nothing new on the server"
                     }
                 }
+                notes += settled.notes()
 
                 // 4. Push
                 val headNow = repo.resolve(Constants.HEAD)
@@ -364,6 +448,154 @@ object GitEngine {
             return SyncOutcome(false, "Sync failed", notes + friendly(e))
         }
     }
+
+    /**
+     * Moves a rebase forward until it finishes, or stops on a clash that has no choice yet.
+     * Each local commit that clashes stops the rebase once; its files are settled by [plan]
+     * and the rebase goes on. Every clash met is added to [seen].
+     */
+    private fun driveRebase(
+        git: Git,
+        start: RebaseResult,
+        plan: Plan,
+        settled: Settled,
+        seen: MutableMap<String, Clash>,
+    ): RebaseResult {
+        val repo = git.repository
+        var result = start
+        var rounds = 0
+        var continuedWithoutClash = false
+        while (rounds++ < 500 && repo.repositoryState.isRebasing) {
+            when (result.status) {
+                // Taking one side can leave a local commit with nothing in it; drop that empty commit.
+                RebaseResult.Status.NOTHING_TO_COMMIT ->
+                    result = git.rebase().setOperation(RebaseCommand.Operation.SKIP).call()
+                RebaseResult.Status.STOPPED -> {
+                    val clashes = readClashes(repo, Op.REBASE)
+                    clashes.forEach { seen[it.path] = it }
+                    if (clashes.isEmpty()) {
+                        // Stopped with nothing left to choose (for example the clash was already
+                        // settled in Termux). Commit what is staged and go on, once.
+                        if (continuedWithoutClash) return result
+                        continuedWithoutClash = true
+                    } else {
+                        if (!plan.decides(clashes)) return result
+                        clashes.forEach { settleClash(git, it, plan.choiceFor(it.path), Op.REBASE, settled) }
+                        continuedWithoutClash = false
+                    }
+                    result = git.rebase().setOperation(RebaseCommand.Operation.CONTINUE).call()
+                }
+                else -> return result
+            }
+        }
+        return result
+    }
+
+    private fun rebaseFinished(repo: Repository, result: RebaseResult): Boolean =
+        !repo.repositoryState.isRebasing && result.status in setOf(
+            RebaseResult.Status.OK,
+            RebaseResult.Status.FAST_FORWARD,
+            RebaseResult.Status.UP_TO_DATE,
+            RebaseResult.Status.NOTHING_TO_COMMIT,
+        )
+
+    /**
+     * A rebase was left stopped on a clash (usually git pull --rebase in Termux). If every
+     * clashing file has a choice, settle them and finish it here. Returns an outcome to show
+     * when the sync can't go on, or null to carry on with the normal sync.
+     */
+    private fun finishOpenRebase(
+        git: Git,
+        plan: Plan,
+        settled: Settled,
+        notes: MutableList<String>,
+        progress: (String) -> Unit,
+    ): SyncOutcome? {
+        val repo = git.repository
+        val clashes = readClashes(repo, Op.REBASE)
+        if (!plan.decides(clashes)) {
+            return clashOutcome(
+                notes + "A pull was left half-done (for example by git pull --rebase in ${Wording.terminal}).",
+                clashes,
+            )
+        }
+        progress("Finishing the half-done pull…")
+        val seen = linkedMapOf<String, Clash>()
+        try {
+            clashes.forEach {
+                seen[it.path] = it
+                settleClash(git, it, plan.choiceFor(it.path), Op.REBASE, settled)
+            }
+            val result = driveRebase(
+                git, git.rebase().setOperation(RebaseCommand.Operation.CONTINUE).call(), plan, settled, seen,
+            )
+            if (rebaseFinished(repo, result)) {
+                notes += "Finished a pull that was left half-done"
+                return null
+            }
+            // A later commit clashed on a file with no choice yet: put everything back and ask.
+            abortRebaseQuietly(git)
+            settled.undo()
+            if (result.status == RebaseResult.Status.STOPPED && seen.isNotEmpty()) {
+                return clashOutcome(notes, seen.values.toList())
+            }
+            notes += "Restarted a pull that was left half-done"
+            return null
+        } catch (e: Exception) {
+            // JGit couldn't carry on with git's own rebase. Undo it (your commits stay) and
+            // let the normal sync redo the pull with the same choices.
+            abortRebaseQuietly(git)
+            settled.undo()
+            if (repo.repositoryState.isRebasing) {
+                return SyncOutcome(
+                    false, "Couldn't finish the half-done pull",
+                    notes + listOf(friendly(e), "In ${Wording.terminal}, run git rebase --abort, then sync again."),
+                )
+            }
+            notes += "Restarted a pull that was left half-done"
+            return null
+        }
+    }
+
+    /**
+     * A merge was left stopped on a clash (usually a plain git pull). If every clashing file
+     * has a choice, settle them and make the merge commit. Returns an outcome to show when
+     * the sync can't go on, or null to carry on with the normal sync.
+     */
+    private fun finishOpenMerge(
+        git: Git,
+        plan: Plan,
+        settled: Settled,
+        fallbackIdentity: Identity,
+        notes: MutableList<String>,
+        progress: (String) -> Unit,
+    ): SyncOutcome? {
+        val repo = git.repository
+        val clashes = readClashes(repo, Op.MERGE)
+        if (!plan.decides(clashes)) {
+            return clashOutcome(notes + "A pull was left half-done (for example by git pull in ${Wording.terminal}).", clashes)
+        }
+        progress("Finishing the half-done pull…")
+        clashes.forEach { settleClash(git, it, plan.choiceFor(it.path), Op.MERGE, settled) }
+        val message = repo.readMergeCommitMsg()
+            ?.lines()?.filterNot { it.startsWith("#") }?.joinToString("\n")?.trim()
+            ?.takeIf { it.isNotEmpty() } ?: "Merge from server"
+        val ident = identFor(repo, fallbackIdentity)
+        git.commit().setMessage(message).setAuthor(ident).setCommitter(ident).call()
+        notes += "Finished a pull that was left half-done"
+        return null
+    }
+
+    private fun clashOutcome(notes: List<String>, clashes: List<Clash>): SyncOutcome =
+        SyncOutcome(
+            false, CONFLICT_TITLE,
+            notes + listOf("These files clashed between the server and your ${Wording.device}:") +
+                clashes.map { "• ${it.path}: ${it.description}" } + listOf(
+                    "Your work is safe: nothing was overwritten or deleted.",
+                    "${Wording.tap} the repo, choose Keep mine or Use server's for each file, then Finish sync.",
+                ),
+            clashes,
+        )
 
     // ---------- Clone ----------
 
@@ -410,13 +642,95 @@ object GitEngine {
     fun defaultCommitMessage(): String =
         "Sync from ${Wording.device} " + SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
 
-    private fun identityFor(repo: Repository, fallback: Identity): Identity {
+    private fun identFor(repo: Repository, fallback: Identity): PersonIdent {
         val name = repo.config.getString("user", null, "name")
         val email = repo.config.getString("user", null, "email")
-        return Identity(
+        return PersonIdent(
             name?.takeIf { it.isNotBlank() } ?: fallback.name,
             email?.takeIf { it.isNotBlank() } ?: fallback.email,
         )
+    }
+
+    /** Which kind of pull git left half-done in this repo, if any. */
+    private fun openPull(repo: Repository): Op? = when {
+        repo.repositoryState.isRebasing -> Op.REBASE
+        repo.repositoryState == RepositoryState.MERGING ||
+            repo.repositoryState == RepositoryState.MERGING_RESOLVED -> Op.MERGE
+        else -> null
+    }
+
+    /** The branch a half-done rebase belongs to ("main"), read from git's own notes. */
+    private fun halfDoneBranch(repo: Repository): String? {
+        for (dir in listOf("rebase-merge", "rebase-apply")) {
+            val f = File(repo.directory, "$dir/head-name")
+            if (f.isFile) return Repository.shortenRefName(f.readText().trim()).takeIf { it.isNotEmpty() }
+        }
+        return null
+    }
+
+    /** Every file the index still has a clash for, and how it clashed. */
+    private fun readClashes(repo: Repository, op: Op): List<Clash> {
+        val dc = repo.readDirCache()
+        val stages = linkedMapOf<String, MutableSet<Int>>()
+        for (i in 0 until dc.entryCount) {
+            val e = dc.getEntry(i)
+            if (e.stage != DirCacheEntry.STAGE_0) stages.getOrPut(e.pathString) { mutableSetOf() }.add(e.stage)
+        }
+        val serverStage = if (op == Op.REBASE) DirCacheEntry.STAGE_2 else DirCacheEntry.STAGE_3
+        val mineStage = if (op == Op.REBASE) DirCacheEntry.STAGE_3 else DirCacheEntry.STAGE_2
+        return stages.map { (path, s) ->
+            val base = DirCacheEntry.STAGE_1 in s
+            val server = serverStage in s
+            val mine = mineStage in s
+            val kind = when {
+                !base && server && mine -> ClashKind.BOTH_ADDED
+                base && server && !mine -> ClashKind.MINE_DELETED
+                base && !server && mine -> ClashKind.SERVER_DELETED
+                else -> ClashKind.BOTH_CHANGED
+            }
+            Clash(path, kind)
+        }
+    }
+
+    /**
+     * Settles one clashing file: writes the chosen side's copy (or deletes the file when
+     * the chosen side deleted it) and marks it settled. When the server's side wins, this
+     * device's copy is saved to the backup folder first.
+     */
+    private fun settleClash(git: Git, clash: Clash, choice: ConflictChoice, op: Op, settled: Settled) {
+        val repo = git.repository
+        val path = clash.path
+        val dc = repo.readDirCache()
+        val serverStage = if (op == Op.REBASE) DirCacheEntry.STAGE_2 else DirCacheEntry.STAGE_3
+        val mineStage = if (op == Op.REBASE) DirCacheEntry.STAGE_3 else DirCacheEntry.STAGE_2
+        var server: DirCacheEntry? = null
+        var mine: DirCacheEntry? = null
+        var i = dc.findEntry(path)
+        while (i in 0 until dc.entryCount && dc.getEntry(i).pathString == path) {
+            val e = dc.getEntry(i)
+            when (e.stage) {
+                serverStage -> server = e
+                mineStage -> mine = e
+            }
+            i++
+        }
+        if (choice == ConflictChoice.USE_SERVER && mine != null) {
+            val copy = File(settled.backupDir(), path)
+            copy.parentFile?.mkdirs()
+            FileOutputStream(copy).use { repo.open(mine.objectId).copyTo(it) }
+        }
+        val keep = if (choice == ConflictChoice.USE_SERVER) server else mine
+        val target = File(repo.workTree, path)
+        if (keep == null) {
+            // The chosen side deleted the file.
+            target.delete()
+            git.rm().addFilepattern(path).call()
+        } else {
+            target.parentFile?.mkdirs()
+            FileOutputStream(target).use { repo.open(keep.objectId).copyTo(it) }
+            git.add().addFilepattern(path).call()
+        }
+        if (choice == ConflictChoice.USE_SERVER) settled.usedServer += path else settled.keptMine += path
     }
 
     /**
@@ -438,42 +752,6 @@ object GitEngine {
     /** Commits reachable from [to] but not from [from]. */
     private fun countCommits(git: Git, from: org.eclipse.jgit.lib.ObjectId, to: org.eclipse.jgit.lib.ObjectId): Int =
         if (from == to) 0 else git.log().addRange(from, to).call().count()
-
-    /**
-     * Settles one conflicting file in the middle of a rebase. During a rebase, stage 2
-     * ("ours") is the server's side and stage 3 ("theirs") is the commit from this device.
-     */
-    private fun settleConflict(git: Git, path: String, choice: ConflictChoice, backupDir: File?) {
-        val repo = git.repository
-        val dc = repo.readDirCache()
-        var server: DirCacheEntry? = null
-        var mine: DirCacheEntry? = null
-        var i = dc.findEntry(path)
-        while (i in 0 until dc.entryCount && dc.getEntry(i).pathString == path) {
-            val e = dc.getEntry(i)
-            when (e.stage) {
-                DirCacheEntry.STAGE_2 -> server = e
-                DirCacheEntry.STAGE_3 -> mine = e
-            }
-            i++
-        }
-        if (choice == ConflictChoice.USE_SERVER && mine != null && backupDir != null) {
-            val copy = File(backupDir, path)
-            copy.parentFile?.mkdirs()
-            FileOutputStream(copy).use { repo.open(mine.objectId).copyTo(it) }
-        }
-        val keep = if (choice == ConflictChoice.USE_SERVER) server else mine
-        val target = File(repo.workTree, path)
-        if (keep == null) {
-            // That side deleted the file.
-            target.delete()
-            git.rm().addFilepattern(path).call()
-        } else {
-            target.parentFile?.mkdirs()
-            FileOutputStream(target).use { repo.open(keep.objectId).copyTo(it) }
-            git.add().addFilepattern(path).call()
-        }
-    }
 
     /**
      * A new folder for this device's copies of files the server's copy replaced. It sits

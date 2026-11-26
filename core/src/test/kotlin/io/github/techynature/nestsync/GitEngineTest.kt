@@ -190,6 +190,213 @@ class GitEngineTest {
         }
     }
 
+    // ---------- choosing per file, and every kind of clash ----------
+
+    /** Runs the real git command line, the way Termux would. */
+    private fun cli(dir: File, vararg args: String): String {
+        val pb = ProcessBuilder(
+            listOf("git", "-c", "user.name=Termux", "-c", "user.email=t@x", "-c", "core.editor=true") + args,
+        ).directory(dir).redirectErrorStream(true)
+        pb.environment()["GIT_EDITOR"] = "true"
+        val p = pb.start()
+        val out = p.inputStream.bufferedReader().readText()
+        p.waitFor()
+        return out
+    }
+
+    private fun sync(dir: File, choices: Map<String, ConflictChoice>) =
+        GitEngine.sync(dir, noCreds, me, choices = choices)
+
+    /** A deletes nothing but edits both files; B edits one and deletes the other. */
+    private fun twoClashes(): Pair<File, File> {
+        val (_, a, b) = setup()
+        File(a, "notes.txt").writeText("seeded by a\n")
+        assertTrue(sync(a).ok)
+        assertTrue(sync(b).ok)
+        File(a, "story.tw").writeText("line one\nA's version\n")
+        File(a, "notes.txt").writeText("A changed the notes\n")
+        assertTrue(sync(a).ok)
+        File(b, "story.tw").writeText("line one\nB's version\n")
+        File(b, "notes.txt").delete()
+        return a to b
+    }
+
+    @Test
+    fun clashesAreListedWithTheirKind() {
+        val (_, b) = twoClashes()
+        val r = sync(b)
+        assertEquals(GitEngine.CONFLICT_TITLE, r.title)
+        assertEquals(
+            listOf(Clash("notes.txt", ClashKind.MINE_DELETED), Clash("story.tw", ClashKind.BOTH_CHANGED)),
+            r.clashes.sortedBy { it.path },
+        )
+        assertTrue(r.details.toString(), r.details.any { "Deleted on your phone" in it })
+        Git.open(b).use { g -> assertEquals(RepositoryState.SAFE, g.repository.repositoryState) }
+    }
+
+    @Test
+    fun eachFileGetsItsOwnChoice() {
+        val (a, b) = twoClashes()
+        assertEquals(GitEngine.CONFLICT_TITLE, sync(b).title)
+        val r = sync(b, mapOf("story.tw" to ConflictChoice.KEEP_MINE, "notes.txt" to ConflictChoice.USE_SERVER))
+        assertTrue(r.details.toString(), r.ok)
+        assertEquals("line one\nB's version\n", File(b, "story.tw").readText())
+        // The server's copy of the file B deleted came back.
+        assertEquals("A changed the notes\n", File(b, "notes.txt").readText())
+        assertTrue(sync(a).ok)
+        assertEquals("line one\nB's version\n", File(a, "story.tw").readText())
+        assertTrue(File(a, "notes.txt").exists())
+    }
+
+    @Test
+    fun keepMineDeletesTheFileThisDeviceDeleted() {
+        val (a, b) = twoClashes()
+        val r = sync(b, mapOf("story.tw" to ConflictChoice.USE_SERVER, "notes.txt" to ConflictChoice.KEEP_MINE))
+        assertTrue(r.details.toString(), r.ok)
+        assertFalse(File(b, "notes.txt").exists())
+        assertTrue(sync(a).ok)
+        assertFalse(File(a, "notes.txt").exists())
+        assertEquals("line one\nA's version\n", File(a, "story.tw").readText())
+    }
+
+    @Test
+    fun aFileWithNoChoiceStopsEverythingAndNothingIsLeftBehind() {
+        val (_, b) = twoClashes()
+        val r = sync(b, mapOf("story.tw" to ConflictChoice.USE_SERVER))
+        assertEquals(GitEngine.CONFLICT_TITLE, r.title)
+        assertEquals(setOf("story.tw", "notes.txt"), r.clashes.map { it.path }.toSet())
+        Git.open(b).use { g ->
+            assertEquals(RepositoryState.SAFE, g.repository.repositoryState)
+            assertTrue(g.status().call().isClean)
+        }
+        assertTrue(File(b, "story.tw").readText().contains("B's version"))
+        assertFalse(File(b.parentFile, "NestSync backups/${b.name}").exists())
+    }
+
+    @Test
+    fun bothAddedTheSameNewFile() {
+        val (_, a, b) = setup()
+        File(a, "new.tw").writeText("from a\n")
+        assertTrue(sync(a).ok)
+        File(b, "new.tw").writeText("from b\n")
+        val r = sync(b)
+        assertEquals(listOf(Clash("new.tw", ClashKind.BOTH_ADDED)), r.clashes)
+        assertTrue(sync(b, mapOf("new.tw" to ConflictChoice.KEEP_MINE)).ok)
+        assertEquals("from b\n", File(b, "new.tw").readText())
+    }
+
+    @Test
+    fun laterCommitClashesAreAllListed() {
+        val (_, a, b) = setup()
+        File(a, "notes.txt").writeText("n\n")
+        assertTrue(sync(a).ok)
+        assertTrue(sync(b).ok)
+        File(a, "story.tw").writeText("line one\nA\n")
+        File(a, "notes.txt").writeText("A notes\n")
+        assertTrue(sync(a).ok)
+        // Two local commits on B, each clashing on a different file.
+        File(b, "story.tw").writeText("line one\nB\n")
+        assertEquals(GitEngine.CONFLICT_TITLE, sync(b).title)
+        File(b, "notes.txt").writeText("B notes\n")
+        val first = sync(b, mapOf("story.tw" to ConflictChoice.KEEP_MINE))
+        assertEquals(GitEngine.CONFLICT_TITLE, first.title)
+        assertEquals(setOf("story.tw", "notes.txt"), first.clashes.map { it.path }.toSet())
+        val r = sync(b, mapOf("story.tw" to ConflictChoice.KEEP_MINE, "notes.txt" to ConflictChoice.USE_SERVER))
+        assertTrue(r.details.toString(), r.ok)
+        assertEquals("line one\nB\n", File(b, "story.tw").readText())
+        assertEquals("A notes\n", File(b, "notes.txt").readText())
+    }
+
+    // ---------- a pull left half-done in Termux ----------
+
+    /** The exact case from the phone: B deleted a file, the server changed it, and git pull --rebase stopped. */
+    private fun termuxRebaseStopped(): Pair<File, File> {
+        val (_, a, b) = setup()
+        File(a, "mod.js").writeText("v1\n")
+        assertTrue(sync(a).ok)
+        assertTrue(sync(b).ok)
+        File(a, "mod.js").writeText("v2 from the server\n")
+        assertTrue(sync(a).ok)
+        File(b, "mod.js").delete()
+        File(b, "other.txt").writeText("B's other edit\n")
+        cli(b, "add", "-A")
+        cli(b, "commit", "-m", "Sync from phone")
+        val out = cli(b, "pull", "--rebase")
+        assertTrue(out, "CONFLICT" in out)
+        Git.open(b).use { g -> assertTrue(g.repository.repositoryState.isRebasing) }
+        return a to b
+    }
+
+    @Test
+    fun halfDoneRebaseIsShownWithItsClashes() {
+        val (_, b) = termuxRebaseStopped()
+        val info = GitEngine.inspect(b)
+        assertTrue(info.halfDone)
+        assertEquals("main", info.branch)
+        assertEquals(listOf(Clash("mod.js", ClashKind.MINE_DELETED)), info.clashes)
+        // A plain sync lists the clash and leaves the half-done pull alone.
+        val r = sync(b)
+        assertEquals(GitEngine.CONFLICT_TITLE, r.title)
+        assertEquals(listOf(Clash("mod.js", ClashKind.MINE_DELETED)), r.clashes)
+        Git.open(b).use { g -> assertTrue(g.repository.repositoryState.isRebasing) }
+    }
+
+    @Test
+    fun halfDoneRebaseFinishesWithServersCopy() {
+        val (a, b) = termuxRebaseStopped()
+        val r = sync(b, mapOf("mod.js" to ConflictChoice.USE_SERVER))
+        assertTrue(r.details.toString(), r.ok)
+        assertEquals("v2 from the server\n", File(b, "mod.js").readText())
+        Git.open(b).use { g ->
+            assertEquals(RepositoryState.SAFE, g.repository.repositoryState)
+            assertEquals("main", g.repository.branch)
+            assertTrue(g.status().call().isClean)
+            assertEquals(0, GitEngine.unpushedCount(g))
+        }
+        assertTrue(sync(a).ok)
+        assertEquals("B's other edit\n", File(a, "other.txt").readText())
+        assertEquals("v2 from the server\n", File(a, "mod.js").readText())
+    }
+
+    @Test
+    fun halfDoneRebaseFinishesKeepingTheDeletion() {
+        val (a, b) = termuxRebaseStopped()
+        val r = sync(b, mapOf("mod.js" to ConflictChoice.KEEP_MINE))
+        assertTrue(r.details.toString(), r.ok)
+        assertFalse(File(b, "mod.js").exists())
+        assertTrue(sync(a).ok)
+        assertFalse(File(a, "mod.js").exists())
+    }
+
+    @Test
+    fun halfDoneRebaseAlreadySettledInTermuxJustFinishes() {
+        val (a, b) = termuxRebaseStopped()
+        cli(b, "add", "mod.js")
+        val r = sync(b)
+        assertTrue(r.details.toString(), r.ok)
+        Git.open(b).use { g -> assertEquals(RepositoryState.SAFE, g.repository.repositoryState) }
+        assertTrue(sync(a).ok)
+        assertEquals("v2 from the server\n", File(a, "mod.js").readText())
+        assertTrue(File(a, "other.txt").exists())
+    }
+
+    @Test
+    fun halfDoneMergeFinishesWithTheChoice() {
+        val (_, a, b) = setup()
+        File(a, "story.tw").writeText("line one\nA's version\n")
+        assertTrue(sync(a).ok)
+        File(b, "story.tw").writeText("line one\nB's version\n")
+        cli(b, "commit", "-am", "B edit")
+        val out = cli(b, "pull", "--no-rebase")
+        assertTrue(out, "CONFLICT" in out)
+        assertEquals(listOf(Clash("story.tw", ClashKind.BOTH_CHANGED)), GitEngine.inspect(b).clashes)
+        val r = sync(b, mapOf("story.tw" to ConflictChoice.KEEP_MINE))
+        assertTrue(r.details.toString(), r.ok)
+        assertEquals("line one\nB's version\n", File(b, "story.tw").readText())
+        assertTrue(sync(a).ok)
+        assertEquals("line one\nB's version\n", File(a, "story.tw").readText())
+    }
+
     @Test
     fun unpushedCommitsAreCounted() {
         val (_, a, _) = setup()
